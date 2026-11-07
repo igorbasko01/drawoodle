@@ -1,0 +1,19 @@
+# The game's Cloudflare Worker: serves the web app and the online server (/api/*)
+# at https://drawoodle.baskorp.com.
+# The fallback deploy: the web app is built into the script (see src/embedded.ts). The usual config is wrangler.toml.
+name = "drawoodle"
+main = "src/embedded.ts"
+compatibility_date = "2026-11-01"
+
+# The game's own address. Cloudflare creates the DNS record and certificate.
+routes = [{ pattern = "drawoodle.baskorp.com", custom_domain = true }]
+
+
+[[d1_databases]]
+binding = "DB"
+database_name = "drawoodle"
+database_id = "3b6756b5-f1b9-48d1-ba9d-19a4b2ce8d3b"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true
