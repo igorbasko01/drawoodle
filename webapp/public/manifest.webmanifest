@@ -1,0 +1,10 @@
+{
+  "name": "Drawoodle",
+  "short_name": "Drawoodle",
+  "description": "A party drawing game for 3–8 players.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1d1442",
+  "theme_color": "#1d1442",
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
