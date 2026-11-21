@@ -1,10 +1,11 @@
-import { FIB_MAX, MAX_PLAYERS, MAX_ROUNDS, MIN_PLAYERS } from '../engine/game';
+import { FIB_MAX, MAX_PLAYERS, MAX_ROUNDS, MIN_PLAYERS, readyUntil } from '../engine/game';
 import { PACKS } from '../engine/prompts';
 import { api, ApiError, linkWith, loadIdentity, saveIdentity, type Identity } from '../online/client';
 import type { GameView, RoomSettings, RoomView } from '../online/types';
 import { Pad } from './pad';
 import {
   clockHtml,
+  countdownHtml,
   esc,
   fixed,
   howToPlayHtml,
@@ -240,6 +241,8 @@ export class PhoneApp {
     tickClocks(this.root, this.clockOffset);
     const g = this.room?.game;
     if (g && g.phase === 'reveal' && this.room?.status === 'playing') this.renderReveal(this.room, g);
+    // The countdown before the first drawing: switch to the drawing the moment it ends, without waiting for a poll.
+    if (g && this.room?.status === 'playing' && this.serverNow < readyUntil(g) + 600) this.renderGame(this.room, g);
   }
 
   private async poll(generation: number) {
@@ -504,7 +507,8 @@ export class PhoneApp {
       this.draft = '';
       this.editingFib = false;
     }
-    const role = !you ? 'watch' : game.phase === 'draw' ? (you.drew ? 'drew' : 'drawing') : you.artist ? 'artist' : game.phase === 'fib' ? (you.fib && !this.editingFib ? 'sent' : 'writing') : 'player';
+    const ready = this.serverNow < readyUntil(game);
+    const role = ready ? 'ready' : !you ? 'watch' : game.phase === 'draw' ? (you.drew ? 'drew' : 'drawing') : you.artist ? 'artist' : game.phase === 'fib' ? (you.fib && !this.editingFib ? 'sent' : 'writing') : 'player';
     const key = `${position}:${role}`;
     const head = this.root.querySelector<HTMLElement>('.phase-head')!;
     const main = this.root.querySelector<HTMLElement>('.phase-main')!;
@@ -525,13 +529,14 @@ export class PhoneApp {
     }
     if (game.phase === 'vote') this.markVote(main, game);
     if (game.phase === 'reveal') this.renderReveal(room, game);
-    const showStatus = game.phase === 'draw' || game.phase === 'fib' || game.phase === 'vote';
+    // During the countdown: the scores, not whose drawing comes first.
+    const showStatus = role !== 'ready' && (game.phase === 'draw' || game.phase === 'fib' || game.phase === 'vote');
     patch(
       foot,
       showStatus
         ? `<ul class="members mini">${room.members.map((m) => memberHtml(m, { you: room.you, status: true })).join('')}</ul>`
         : `<ul class="members mini">${ranking(room.members)
-            .map((m) => memberHtml(m, { you: room.you, score: true }))
+            .map((m) => memberHtml(role === 'ready' ? { ...m, artist: false } : m, { you: room.you, score: true }))
             .join('')}</ul>`,
     );
     tickClocks(this.root, this.clockOffset);
@@ -539,12 +544,13 @@ export class PhoneApp {
   }
 
   private headHtml(game: GameView) {
-    const clock = game.phase === 'reveal' ? '' : clockHtml(game.endsAt, this.serverNow);
+    const ready = this.serverNow < readyUntil(game);
+    const clock = game.phase === 'reveal' || ready ? '' : clockHtml(game.endsAt, this.serverNow);
     const where =
       game.phase === 'draw'
         ? `Round ${fixed(`${game.round + 1}/${game.rounds}`)}`
         : `Round ${fixed(`${game.round + 1}/${game.rounds}`)} · Drawing ${fixed(`${game.step + 1}/${game.steps}`)}`;
-    const what = { draw: 'Draw!', fib: 'Make up a title', vote: 'Find the real title', reveal: 'The reveal', over: 'Game over' }[game.phase];
+    const what = ready ? 'Get ready!' : { draw: 'Draw!', fib: 'Make up a title', vote: 'Find the real title', reveal: 'The reveal', over: 'Game over' }[game.phase];
     return `<div class="phase-where">${where}</div><div class="phase-what"><h1>${what}</h1>${clock}</div>`;
   }
 
@@ -554,6 +560,13 @@ export class PhoneApp {
     const artist = game.drawing ? room.members[game.drawing.artist] : undefined;
     const byline = artist ? `<p class="byline">Drawn by ${nameHtml(artist.nickname)}</p>` : '';
     switch (`${game.phase}:${role}`) {
+      case 'fib:ready':
+        return `<div class="ready-card">
+          <p class="big-emoji">🎨</p>
+          <p><b>All the drawings are in!</b></p>
+          <p class="muted">Next: write a fake title for each drawing that will fool the others.</p>
+          ${countdownHtml(readyUntil(game), this.serverNow)}
+        </div>`;
       case 'draw:drawing':
         return `<p class="prompt-label">Your secret prompt. Draw it, no letters!</p>${prompt}
           <div class="pad"></div>

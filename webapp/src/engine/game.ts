@@ -24,6 +24,15 @@ export const TIMES: Record<Pace, { draw: number; fib: number; vote: number }> = 
   relaxed: { draw: 120, fib: 80, vote: 40 },
 };
 
+/**
+ * When the drawing ends, the first drawing's fake titles start with this short countdown,
+ * so nobody is caught off guard. It's added to that phase's time, so writers lose nothing.
+ */
+export const READY_MS = 4000;
+
+/** Until when the countdown before the first drawing shows (0 when there is none). */
+export const readyUntil = (g: { phase: Phase; step: number; phaseAt: number }) => (g.phase === 'fib' && g.step === 0 ? g.phaseAt + READY_MS : 0);
+
 /** Extra time after a deadline for the last submissions to arrive (phones send what they have when time runs out). */
 export const GRACE_MS = 2500;
 
@@ -190,7 +199,7 @@ export const nextPosition = (
     at.round + 1 < ctx.rounds ? { round: at.round + 1, phase: 'draw', step: 0, endsAt: s(t.draw) } : { round: at.round, phase: 'over', step: 0, endsAt: 0 };
   switch (at.phase) {
     case 'draw':
-      return ctx.drawings > 0 ? { round: at.round, phase: 'fib', step: 0, endsAt: s(t.fib) } : nextRound();
+      return ctx.drawings > 0 ? { round: at.round, phase: 'fib', step: 0, endsAt: s(t.fib) + READY_MS } : nextRound();
     case 'fib':
       return { ...at, phase: 'vote', endsAt: s(t.vote) };
     case 'vote':

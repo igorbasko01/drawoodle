@@ -7,7 +7,7 @@ Play it at **https://drawoodle.baskorp.com**.
 
 - One player creates a **room**; everyone else joins on their phone with the 4-letter code, the invite link, or the QR code on the TV.
 - **Draw:** everyone gets a secret, silly prompt ("A snail winning a race") and draws it on their phone.
-- **Fake titles:** the drawings are shown one at a time. For each, the other players write a fake title that could pass for the real one.
+- **Fake titles:** once everyone has drawn, a short 3-2-1 countdown gives everyone a moment to get ready (the TV keeps the first drawing hidden until it ends). Then the drawings are shown one at a time. For each, the other players write a fake title that could pass for the real one.
 - **Vote:** the real title is mixed in with the fakes, and everyone except the artist votes for the one they think is real.
 - **Reveal:** the titles are revealed one by one, showing who picked each and who wrote it, with the real one last.
 - **Points:** +1000 for finding the real title; +500 to whoever wrote a fake for every player it fooled; +500 to the artist for every player who found theirs. Identical fakes are merged and score for every author.
