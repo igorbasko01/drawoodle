@@ -31,6 +31,8 @@ export interface Env {
 const ROOM_TTL_MS = 12 * 60 * 60 * 1000;
 /** A player or TV that checked in this recently counts as connected. */
 const ONLINE_MS = 8000;
+/** "Last seen" is only written when it's older than this, so most polls write nothing. */
+const SEEN_EVERY_MS = 3000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 interface PlayerRow {
@@ -112,7 +114,7 @@ const CORS = {
   'access-control-allow-methods': 'GET, POST, OPTIONS',
   'access-control-allow-headers': 'authorization, content-type',
   'access-control-max-age': '86400',
-  'access-control-expose-headers': 'x-db-trips',
+  'access-control-expose-headers': 'x-db-trips, x-db-writes',
 };
 
 const json = (data: unknown, status = 200, cache = 'no-store') =>
@@ -147,11 +149,8 @@ const tokenHashOf = async (req: Request) => {
   return sha256(token);
 };
 
-const authenticate = async (req: Request, env: Env): Promise<PlayerRow> => {
-  const p = await env.DB.prepare('SELECT id, nickname FROM players WHERE token_hash = ?').bind(await tokenHashOf(req)).first<PlayerRow>();
-  if (!p) throw new HttpError(401, 'Unknown token');
-  return p;
-};
+/** The caller's player id, as a subquery: bound with the token's hash, so no request needs a separate lookup. */
+const ME = '(SELECT id FROM players WHERE token_hash = ?)';
 
 // ------------------------------------------------------------------ players
 
@@ -166,27 +165,37 @@ const createPlayer = async (req: Request, env: Env) => {
   return json({ player: { id, nickname }, token }, 201);
 };
 
-const renamePlayer = async (req: Request, me: PlayerRow, env: Env) => {
-  const nickname = cleanNickname((await body(req)).nickname);
+const renamePlayer = async (req: Request, env: Env) => {
+  const [tokenHash, data] = await Promise.all([tokenHashOf(req), body(req)]);
+  const nickname = cleanNickname(data.nickname);
   if (!nickname) throw new HttpError(400, 'Choose a nickname');
-  await env.DB.prepare('UPDATE players SET nickname = ? WHERE id = ?').bind(nickname, me.id).run();
-  return json({ player: { id: me.id, nickname } });
+  const p = await env.DB.prepare('UPDATE players SET nickname = ? WHERE token_hash = ? RETURNING id, nickname').bind(nickname, tokenHash).first<PlayerRow>();
+  if (!p) throw new HttpError(401, 'Unknown token');
+  return json({ player: p });
+};
+
+const whoAmI = async (req: Request, env: Env) => {
+  const p = await env.DB.prepare('SELECT id, nickname FROM players WHERE token_hash = ?').bind(await tokenHashOf(req)).first<PlayerRow>();
+  if (!p) throw new HttpError(401, 'Unknown token');
+  return json({ player: p });
 };
 
 // ------------------------------------------------------------------ loading a room
 
-/** Which room: by id, or by its code (the TV). */
-type RoomRef = { id: string } | { code: string };
+/** Which room: by id, by its code (joining, the TV), or any SQL that selects its id. */
 type Sql = { sql: string; params: unknown[] };
+type RoomRef = { id: string } | { code: string } | Sql;
 
 /** SQL that selects the room's id, with its parameters, to use as a subquery. */
 const roomIdSql = (ref: RoomRef, now: number): Sql =>
-  'id' in ref
-    ? { sql: '?', params: [ref.id] }
-    : {
-        sql: "(SELECT id FROM rooms WHERE code = ? AND status != 'closed' AND updated_at > ? ORDER BY created_at DESC LIMIT 1)",
-        params: [ref.code, now - ROOM_TTL_MS],
-      };
+  'sql' in ref
+    ? ref
+    : 'id' in ref
+      ? { sql: '?', params: [ref.id] }
+      : {
+          sql: "(SELECT id FROM rooms WHERE code = ? AND status != 'closed' AND updated_at > ? ORDER BY created_at DESC LIMIT 1)",
+          params: [String(ref.code).toUpperCase().replace(/[^A-Z]/g, ''), now - ROOM_TTL_MS],
+        };
 
 /** Reads everything about a room and its game; appended to every batch so a write and its result are one round trip. */
 const readStatements = (env: Env, R: Sql) => {
@@ -194,15 +203,19 @@ const readStatements = (env: Env, R: Sql) => {
   const p = R.params;
   return [
     env.DB.prepare(`SELECT * FROM rooms WHERE id = ${R.sql}`).bind(...p),
+    // The members, then (without joined_at) the game's players who have left the room: their names are still shown.
     env.DB.prepare(
-      `SELECT m.player_id, p.nickname, m.joined_at, m.last_seen FROM room_members m JOIN players p ON p.id = m.player_id WHERE m.room_id = ${R.sql} ORDER BY m.joined_at`,
-    ).bind(...p),
+      `SELECT m.player_id, p.nickname, m.joined_at, m.last_seen FROM room_members m JOIN players p ON p.id = m.player_id WHERE m.room_id = ${R.sql}
+       UNION ALL
+       SELECT p.id, p.nickname, NULL, NULL FROM players p
+       WHERE p.id IN (SELECT value FROM json_each((SELECT seats FROM games WHERE id = ${G})))
+         AND p.id NOT IN (SELECT player_id FROM room_members WHERE room_id = ${R.sql})`,
+    ).bind(...p, ...p, ...p),
     env.DB.prepare(`SELECT * FROM games WHERE id = ${G}`).bind(...p),
     // Drawings are shown in the order of their random ids. Their strokes are fetched separately, once, and cached.
     env.DB.prepare(`SELECT id, round, seat FROM drawings WHERE game_id = ${G} ORDER BY round, id`).bind(...p),
     env.DB.prepare(`SELECT round, artist, seat, text FROM fibs WHERE game_id = ${G}`).bind(...p),
     env.DB.prepare(`SELECT round, artist, seat, choice FROM votes WHERE game_id = ${G}`).bind(...p),
-    env.DB.prepare(`SELECT id, nickname FROM players WHERE id IN (SELECT value FROM json_each((SELECT seats FROM games WHERE id = ${G})))`).bind(...p),
   ];
 };
 
@@ -224,41 +237,58 @@ const parseReads = (res: D1Result[], at: number, me: PlayerRow | null, missing: 
   const rows = <T>(i: number) => (res[at + i].results ?? []) as T[];
   const room = rows<RoomRow>(0)[0];
   if (!room) throw new HttpError(404, missing);
+  const people = rows<Omit<MemberRow, 'joined_at' | 'last_seen'> & { joined_at: number | null; last_seen: number | null }>(1);
   return {
     me,
     room,
-    members: rows<MemberRow>(1),
+    members: people.filter((m): m is MemberRow => m.joined_at !== null).sort((a, b) => a.joined_at - b.joined_at),
     game: rows<GameRow>(2)[0] ?? null,
     drawings: rows<DrawingRow>(3),
     fibs: rows<FibRow>(4),
     votes: rows<VoteRow>(5),
-    seatPlayers: rows<PlayerRow>(6),
+    seatPlayers: people.map((m) => ({ id: m.player_id, nickname: m.nickname })),
   };
 };
 
 /**
- * Loads a room in one batch (one round trip to the database). Dependent lookups
- * (the room's game) are subqueries. With `seen`, it also records that the caller
- * (a member, or the TV) is still connected.
+ * One round trip for any request about a room: a single batch (a transaction) that
+ * identifies the caller by their token, runs the request's writes, and reads the room
+ * back. Writes get the room's id and the caller's id as SQL (`R`, `ME` bound with
+ * `tokenHash`), so the rules (only the host, room full, your own seat) are conditions
+ * in the writes themselves, and the read-back shows whether they applied.
+ * With `seen`, it also records that the caller (a member, or the TV) is still connected,
+ * at most every few seconds, so most polls write nothing.
  */
-const loadState = async (env: Env, ref: RoomRef, opts: { who?: { tokenHash: string } | { id: string }; seen?: boolean; tv?: boolean } = {}) => {
+const run = async (
+  env: Env,
+  ref: RoomRef,
+  opts: { tokenHash?: string; writes?: (R: Sql, now: number) => D1PreparedStatement[]; seen?: boolean; tv?: boolean; missing?: string } = {},
+) => {
   const now = Date.now();
   const R = roomIdSql(ref, now);
-  const byToken = !!opts.who && 'tokenHash' in opts.who;
-  const meSql = byToken ? '(SELECT id FROM players WHERE token_hash = ?)' : '?';
-  const meParam = opts.who ? ('tokenHash' in opts.who ? opts.who.tokenHash : opts.who.id) : null;
+  const t = opts.tokenHash;
   const stmts: D1PreparedStatement[] = [];
-  if (byToken) stmts.push(env.DB.prepare('SELECT id, nickname FROM players WHERE token_hash = ?').bind(meParam));
-  if (opts.who && opts.seen)
-    stmts.push(env.DB.prepare(`UPDATE room_members SET last_seen = ? WHERE room_id = ${R.sql} AND player_id = ${meSql}`).bind(now, ...R.params, meParam));
-  if (opts.tv) stmts.push(env.DB.prepare(`UPDATE rooms SET tv_seen_at = ? WHERE id = ${R.sql}`).bind(now, ...R.params));
+  if (t) stmts.push(env.DB.prepare('SELECT id, nickname FROM players WHERE token_hash = ?').bind(t));
+  stmts.push(...(opts.writes?.(R, now) ?? []));
+  if (t && opts.seen)
+    stmts.push(
+      env.DB.prepare(`UPDATE room_members SET last_seen = ? WHERE room_id = ${R.sql} AND player_id = ${ME} AND last_seen < ?`).bind(now, ...R.params, t, now - SEEN_EVERY_MS),
+    );
+  if (opts.tv)
+    stmts.push(env.DB.prepare(`UPDATE rooms SET tv_seen_at = ? WHERE id = ${R.sql} AND (tv_seen_at IS NULL OR tv_seen_at < ?)`).bind(now, ...R.params, now - SEEN_EVERY_MS));
   const first = stmts.length;
   stmts.push(...readStatements(env, R));
   const res = await env.DB.batch(stmts);
-  const me = byToken ? (((res[0].results ?? [])[0] as PlayerRow | undefined) ?? null) : null;
-  const st = parseReads(res, first, me, 'id' in ref ? 'Room not found' : 'No room with that code');
-  if (opts.who && !byToken) st.me = st.members.map((m) => ({ id: m.player_id, nickname: m.nickname })).find((m) => m.id === meParam) ?? null;
-  return st;
+  const me = t ? (((res[0].results ?? [])[0] as PlayerRow | undefined) ?? null) : null;
+  if (t && !me) throw new HttpError(401, 'Unknown token');
+  return parseReads(res, first, me, opts.missing ?? ('code' in ref ? 'No room with that code' : 'Room not found'));
+};
+
+/** `run` for a caller who must be a member of the room. */
+const runAsMember = async (env: Env, ref: RoomRef, tokenHash: string, opts: Parameters<typeof run>[2] = {}) => {
+  const st = await run(env, ref, { ...opts, tokenHash });
+  requireMember(st, st.me!.id);
+  return st as RoomState & { me: PlayerRow };
 };
 
 /** Runs writes and reads the room back, in one batch (a transaction, one round trip). */
@@ -476,204 +506,233 @@ const requireMember = (st: RoomState, playerId: string) => {
   if (!st.members.some((m) => m.player_id === playerId)) throw new HttpError(403, 'You are not in this room');
 };
 
-/** The room as a member sees it (one round trip); also records that they are still connected. */
-const memberView = async (env: Env, roomId: string, me: PlayerRow, status = 200) => {
-  const st = await loadState(env, { id: roomId }, { who: { id: me.id }, seen: true });
-  requireMember(st, me.id);
-  return json(buildView(st, me.id), status);
-};
-
 /** A poll of the room: one round trip (two when it moves the game on). */
 const getRoom = async (req: Request, env: Env, id: string) => {
-  const st = await loadState(env, { id }, { who: { tokenHash: await tokenHashOf(req) }, seen: true });
-  if (!st.me) throw new HttpError(401, 'Unknown token');
-  requireMember(st, st.me.id);
+  const st = await runAsMember(env, { id }, await tokenHashOf(req), { seen: true });
   return json(buildView(await settle(env, st), st.me.id));
 };
 
 /** A TV screen: shows the room by its code, without an account and without being a player. It moves the game on too. */
-const tvView = async (env: Env, code: string) => json(buildView(await settle(env, await loadState(env, { code: code.toUpperCase() }, { tv: true })), null));
+const tvView = async (env: Env, code: string) => json(buildView(await settle(env, await run(env, { code }, { tv: true })), null));
 
 // ------------------------------------------------------------------ rooms
+// Every request here is one round trip: the rules are conditions in the SQL, and the
+// room read back in the same batch shows whether a write applied, and if not, why.
 
-const loadRoom = async (env: Env, id: string) => {
-  const r = await env.DB.prepare('SELECT * FROM rooms WHERE id = ?').bind(id).first<RoomRow>();
-  if (!r) throw new HttpError(404, 'Room not found');
-  return r;
-};
-
-const roomByCode = async (env: Env, raw: unknown) => {
-  const code = String(raw ?? '')
-    .toUpperCase()
-    .replace(/[^A-Z]/g, '');
-  const r = await env.DB.prepare("SELECT * FROM rooms WHERE code = ? AND status != 'closed' AND updated_at > ? ORDER BY created_at DESC LIMIT 1")
-    .bind(code, Date.now() - ROOM_TTL_MS)
-    .first<RoomRow>();
-  if (!r) throw new HttpError(404, 'No room with that code');
-  return r;
-};
-
-const loadMembers = async (env: Env, roomId: string) =>
-  (
-    await env.DB.prepare(
-      'SELECT m.player_id, p.nickname, m.joined_at, m.last_seen FROM room_members m JOIN players p ON p.id = m.player_id WHERE m.room_id = ? ORDER BY m.joined_at',
-    )
-      .bind(roomId)
-      .all<MemberRow>()
-  ).results;
-
-const readSettings = (data: Record<string, unknown>, fallback: { rounds: number; pack: Pack; pace: Pace }) => {
-  const rounds = data.rounds === undefined ? fallback.rounds : Number(data.rounds);
-  const pack = (data.pack === undefined ? fallback.pack : String(data.pack)) as Pack;
-  const pace = (data.pace === undefined ? fallback.pace : String(data.pace)) as Pace;
-  if (!Number.isInteger(rounds) || rounds < 1 || rounds > MAX_ROUNDS) throw new HttpError(400, `Choose 1 to ${MAX_ROUNDS} rounds`);
-  if (!(pack in PACKS)) throw new HttpError(400, 'Unknown prompt language');
-  if (!(pace in TIMES)) throw new HttpError(400, 'Unknown pace');
+const readSettings = (data: Record<string, unknown>) => {
+  const given = (v: unknown) => v !== undefined && v !== null;
+  const rounds = given(data.rounds) ? Number(data.rounds) : null;
+  const pack = given(data.pack) ? (String(data.pack) as Pack) : null;
+  const pace = given(data.pace) ? (String(data.pace) as Pace) : null;
+  if (rounds !== null && (!Number.isInteger(rounds) || rounds < 1 || rounds > MAX_ROUNDS)) throw new HttpError(400, `Choose 1 to ${MAX_ROUNDS} rounds`);
+  if (pack !== null && !(pack in PACKS)) throw new HttpError(400, 'Unknown prompt language');
+  if (pace !== null && !(pace in TIMES)) throw new HttpError(400, 'Unknown pace');
   return { rounds, pack, pace };
 };
 
-const createRoom = async (req: Request, me: PlayerRow, env: Env) => {
-  const s = readSettings(await body(req), { rounds: 2, pack: 'en', pace: 'normal' });
-  const now = Date.now();
+const requireHost = (st: RoomState) => {
+  if (st.room.host_id !== st.me?.id) throw new HttpError(403, 'Only the host can do that');
+};
+
+/** Creates a room with a free 4-letter code; the creator is the host. */
+const createRoom = async (req: Request, env: Env) => {
+  const [tokenHash, data] = await Promise.all([tokenHashOf(req), body(req)]);
+  const s = readSettings(data);
   for (let attempt = 0; attempt < 10; attempt++) {
-    const code = randomString(CODE_ALPHABET, 4);
-    const taken = await env.DB.prepare("SELECT 1 FROM rooms WHERE code = ? AND status != 'closed' AND updated_at > ?")
-      .bind(code, now - ROOM_TTL_MS)
-      .first();
-    if (taken) continue;
     const id = randomHex(8);
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO rooms (id, code, host_id, rounds, pack, pace, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lobby', ?, ?)").bind(
-        id,
-        code,
-        me.id,
-        s.rounds,
-        s.pack,
-        s.pace,
-        now,
-        now,
-      ),
-      env.DB.prepare('INSERT INTO room_members (room_id, player_id, joined_at, last_seen) VALUES (?, ?, ?, ?)').bind(id, me.id, now, now),
-    ]);
-    return memberView(env, id, me, 201);
+    const code = randomString(CODE_ALPHABET, 4);
+    try {
+      const st = await runAsMember(env, { id }, tokenHash, {
+        writes: (_R, now) => [
+          // Only if the code isn't in use: otherwise nothing is written, and we try another.
+          env.DB.prepare(
+            `INSERT INTO rooms (id, code, host_id, rounds, pack, pace, status, created_at, updated_at)
+             SELECT ?, ?, p.id, ?, ?, ?, 'lobby', ?, ? FROM players p WHERE p.token_hash = ?
+               AND NOT EXISTS (SELECT 1 FROM rooms WHERE code = ? AND status != 'closed' AND updated_at > ?)`,
+          ).bind(id, code, s.rounds ?? 2, s.pack ?? 'en', s.pace ?? 'normal', now, now, tokenHash, code, now - ROOM_TTL_MS),
+          env.DB.prepare(`INSERT INTO room_members (room_id, player_id, joined_at, last_seen) SELECT id, host_id, ?, ? FROM rooms WHERE id = ?`).bind(now, now, id),
+        ],
+      });
+      return json(buildView(st, st.me.id), 201);
+    } catch (e) {
+      // The code was taken (the room wasn't created): try another one.
+      if (!(e instanceof HttpError && e.status === 404)) throw e;
+    }
   }
   throw new HttpError(503, 'Could not find a free room code, try again');
 };
 
-const joinRoom = async (req: Request, me: PlayerRow, env: Env) => {
-  const r = await roomByCode(env, (await body(req)).code);
-  const st = await loadState(env, { id: r.id });
-  if (st.members.some((m) => m.player_id === me.id)) return memberView(env, r.id, me);
-  const now = Date.now();
-  const insert = env.DB.prepare('INSERT OR IGNORE INTO room_members (room_id, player_id, joined_at, last_seen) VALUES (?, ?, ?, ?)').bind(r.id, me.id, now, now);
-  if (r.status === 'playing') {
-    // Someone who left (or was removed from) the game in progress can come back to their seat.
-    if (!st.game || !(JSON.parse(st.game.seats) as string[]).includes(me.id))
-      throw new HttpError(409, 'A game is in progress in that room. Join when it ends, or watch it on a TV.');
-    await insert.run();
-    return memberView(env, r.id, me);
-  }
-  if (st.members.length >= MAX_PLAYERS) throw new HttpError(409, `That room is full (${MAX_PLAYERS} players)`);
-  await env.DB.batch([insert, env.DB.prepare('UPDATE rooms SET updated_at = ? WHERE id = ?').bind(now, r.id)]);
-  // Two players can join the last place at once: the later one leaves again.
-  const after = await loadState(env, { id: r.id }, { who: { id: me.id } });
-  if (after.members.findIndex((m) => m.player_id === me.id) >= MAX_PLAYERS) {
-    await env.DB.prepare('DELETE FROM room_members WHERE room_id = ? AND player_id = ?').bind(r.id, me.id).run();
+/**
+ * Joins a room by its code: between games if there's a place, or during a game to
+ * your own seat (after leaving it). Rejoining a room you're in changes nothing. The
+ * check and the insert are one statement in one transaction, so two players can't
+ * both take the last place.
+ */
+const joinRoom = async (req: Request, env: Env) => {
+  const [tokenHash, data] = await Promise.all([tokenHashOf(req), body(req)]);
+  const st = await run(env, { code: String(data.code ?? '') }, {
+    tokenHash,
+    writes: (R, now) => [
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO room_members (room_id, player_id, joined_at, last_seen)
+         SELECT r.id, ${ME}, ?, ? FROM rooms r WHERE r.id = ${R.sql} AND ${ME} IS NOT NULL AND (
+           (r.status != 'playing' AND (SELECT COUNT(*) FROM room_members WHERE room_id = r.id) < ?)
+           OR (r.status = 'playing' AND EXISTS (SELECT 1 FROM games g, json_each(g.seats) s WHERE g.id = r.game_id AND s.value = ${ME}))
+         )`,
+      ).bind(tokenHash, now, now, ...R.params, tokenHash, MAX_PLAYERS, tokenHash),
+      env.DB.prepare(`UPDATE rooms SET updated_at = ? WHERE id = ${R.sql} AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id AND player_id = ${ME})`).bind(
+        now,
+        ...R.params,
+        tokenHash,
+      ),
+    ],
+  });
+  const me = st.me!;
+  if (!st.members.some((m) => m.player_id === me.id)) {
+    if (st.room.status === 'playing') throw new HttpError(409, 'A game is in progress in that room. Join when it ends, or watch it on a TV.');
     throw new HttpError(409, `That room is full (${MAX_PLAYERS} players)`);
   }
-  return json(buildView(after, me.id));
+  return json(buildView(st, me.id));
 };
 
-const requireHost = (r: RoomRow, me: PlayerRow) => {
-  if (r.host_id !== me.id) throw new HttpError(403, 'Only the host can do that');
-};
-
-const changeSettings = async (req: Request, me: PlayerRow, env: Env, id: string) => {
-  const r = await loadRoom(env, id);
-  requireHost(r, me);
-  if (r.status === 'playing') throw new HttpError(409, 'Settings can be changed between games');
-  const s = readSettings(await body(req), r);
-  await env.DB.prepare('UPDATE rooms SET rounds = ?, pack = ?, pace = ?, updated_at = ? WHERE id = ?').bind(s.rounds, s.pack, s.pace, Date.now(), r.id).run();
-  return memberView(env, id, me);
-};
-
-/** Starts a game with everyone in the room, in join order. Also used for "play again". */
-const startGame = async (me: PlayerRow, env: Env, id: string) => {
-  const r = await loadRoom(env, id);
-  requireHost(r, me);
-  if (r.status === 'playing') return memberView(env, r.id, me);
-  const seats = (await loadMembers(env, r.id)).map((m) => m.player_id);
-  if (seats.length < MIN_PLAYERS) throw new HttpError(400, `You need at least ${MIN_PLAYERS} players`);
-  const gameId = randomHex(8);
-  const now = Date.now();
-  const seed = crypto.getRandomValues(new Uint32Array(1))[0];
-  const prompts = dealPrompts(seed, PACKS[r.pack].prompts, r.rounds, seats.length);
-  // The game first, so a room never points at a game that isn't there; a start that loses a race leaves an unused game.
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO games (id, room_id, seed, seats, prompts, pack, pace, rounds, status, round, phase, step, phase_at, ends_at, started_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'playing', 0, 'draw', 0, ?, ?, ?)`,
-    ).bind(gameId, r.id, seed, JSON.stringify(seats), JSON.stringify(prompts), r.pack, r.pace, r.rounds, now, now + TIMES[r.pace].draw * 1000, now),
-    env.DB.prepare("UPDATE rooms SET status = 'playing', game_id = ?, updated_at = ? WHERE id = ? AND status != 'playing'").bind(gameId, now, r.id),
-  ]);
-  return memberView(env, id, me);
-};
-
-const finishGame = (env: Env, r: RoomRow, gameId: string) => {
-  const now = Date.now();
-  return env.DB.batch([
-    env.DB.prepare("UPDATE games SET status = 'ended', finished_at = ? WHERE id = ? AND status = 'playing'").bind(now, gameId),
-    env.DB.prepare("UPDATE rooms SET status = 'finished', updated_at = ? WHERE id = ? AND game_id = ?").bind(now, r.id, gameId),
-  ]);
-};
-
-/** The host stops the game in progress; the room goes back to choosing the next one. */
-const endGame = async (me: PlayerRow, env: Env, id: string) => {
-  const r = await loadRoom(env, id);
-  requireHost(r, me);
-  if (r.status === 'playing' && r.game_id) await finishGame(env, r, r.game_id);
-  return memberView(env, id, me);
+/** The host changes the game's settings between games (only the ones given). */
+const changeSettings = async (req: Request, env: Env, id: string) => {
+  const [tokenHash, data] = await Promise.all([tokenHashOf(req), body(req)]);
+  const s = readSettings(data);
+  const st = await runAsMember(env, { id }, tokenHash, {
+    writes: (_R, now) => [
+      env.DB.prepare(
+        `UPDATE rooms SET rounds = COALESCE(?, rounds), pack = COALESCE(?, pack), pace = COALESCE(?, pace), updated_at = ?
+         WHERE id = ? AND host_id = ${ME} AND status != 'playing'`,
+      ).bind(s.rounds, s.pack, s.pace, now, id, tokenHash),
+    ],
+  });
+  requireHost(st);
+  if (st.room.status === 'playing') throw new HttpError(409, 'Settings can be changed between games');
+  return json(buildView(st, st.me.id));
 };
 
 /**
- * Takes a player out of the room. In a game in progress their seat stays and the game
- * stops waiting for them; it ends only when none of its players are left.
- * The host role passes to the next player in the room.
+ * The host starts a game with everyone in the room, in join order (also "play again").
+ * Prompts are dealt for the most rounds and players a game can have, in both prompt
+ * languages, so the room's settings and players can be read inside the same statement.
  */
-const removeMember = async (env: Env, r: RoomRow, playerId: string) => {
-  await env.DB.prepare('DELETE FROM room_members WHERE room_id = ? AND player_id = ?').bind(r.id, playerId).run();
-  const st = await loadState(env, { id: r.id });
-  const now = Date.now();
-  if (st.room.status === 'playing' && st.game && !st.members.some((m) => (JSON.parse(st.game!.seats) as string[]).includes(m.player_id)))
-    await finishGame(env, st.room, st.game.id);
-  if (!st.members.length) await env.DB.prepare("UPDATE rooms SET status = 'closed', updated_at = ? WHERE id = ?").bind(now, r.id).run();
-  else if (st.room.host_id === playerId) await env.DB.prepare('UPDATE rooms SET host_id = ?, updated_at = ? WHERE id = ?').bind(st.members[0].player_id, now, r.id).run();
+const startGame = async (req: Request, env: Env, id: string) => {
+  const tokenHash = await tokenHashOf(req);
+  const gameId = randomHex(8);
+  const seed = crypto.getRandomValues(new Uint32Array(1))[0];
+  const deal = (pack: Pack) => JSON.stringify(dealPrompts(seed, PACKS[pack].prompts, MAX_ROUNDS, MAX_PLAYERS));
+  const draw = (pace: Pace) => TIMES[pace].draw * 1000;
+  const st = await runAsMember(env, { id }, tokenHash, {
+    writes: (_R, now) => [
+      // The game first, so a room never points at a game that isn't there.
+      env.DB.prepare(
+        `INSERT INTO games (id, room_id, seed, seats, prompts, pack, pace, rounds, status, round, phase, step, phase_at, ends_at, started_at)
+         SELECT ?, r.id, ?, (SELECT json_group_array(player_id) FROM (SELECT player_id FROM room_members WHERE room_id = r.id ORDER BY joined_at)),
+           CASE r.pack WHEN 'he' THEN ? ELSE ? END, r.pack, r.pace, r.rounds, 'playing', 0, 'draw', 0, ?,
+           ? + CASE r.pace WHEN 'relaxed' THEN ? ELSE ? END, ?
+         FROM rooms r WHERE r.id = ? AND r.host_id = ${ME} AND r.status != 'playing'
+           AND (SELECT COUNT(*) FROM room_members WHERE room_id = r.id) >= ?`,
+      ).bind(gameId, seed, deal('he'), deal('en'), now, now, draw('relaxed'), draw('normal'), now, id, tokenHash, MIN_PLAYERS),
+      env.DB.prepare("UPDATE rooms SET status = 'playing', game_id = ?, updated_at = ? WHERE id = ? AND status != 'playing' AND EXISTS (SELECT 1 FROM games WHERE id = ?)").bind(
+        gameId,
+        now,
+        id,
+        gameId,
+      ),
+    ],
+  });
+  if (st.room.game_id !== gameId && st.room.status !== 'playing') {
+    requireHost(st);
+    throw new HttpError(400, `You need at least ${MIN_PLAYERS} players`);
+  }
+  return json(buildView(st, st.me.id));
 };
 
-const leaveRoom = async (me: PlayerRow, env: Env, id: string) => {
-  await removeMember(env, await loadRoom(env, id), me.id);
+/** The host stops the game in progress; the room goes back to choosing the next one. */
+const endGame = async (req: Request, env: Env, id: string) => {
+  const tokenHash = await tokenHashOf(req);
+  const st = await runAsMember(env, { id }, tokenHash, {
+    writes: (_R, now) => [
+      env.DB.prepare(
+        `UPDATE games SET status = 'ended', finished_at = ?
+         WHERE id = (SELECT game_id FROM rooms WHERE id = ? AND host_id = ${ME} AND status = 'playing') AND status = 'playing'`,
+      ).bind(now, id, tokenHash),
+      env.DB.prepare(`UPDATE rooms SET status = 'finished', updated_at = ? WHERE id = ? AND host_id = ${ME} AND status = 'playing'`).bind(now, id, tokenHash),
+    ],
+  });
+  requireHost(st);
+  return json(buildView(st, st.me.id));
+};
+
+/**
+ * Takes a player out of the room, as SQL: `who` selects the player to remove. In a
+ * game in progress their seat stays and the game stops waiting for them; it ends only
+ * when none of its players are left. The host role passes to the next player in the
+ * room, and a room nobody is left in closes.
+ */
+const removeStatements = (env: Env, id: string, who: Sql, now: number) => [
+  env.DB.prepare(`DELETE FROM room_members WHERE room_id = ? AND player_id = ${who.sql}`).bind(id, ...who.params),
+  env.DB.prepare(
+    `UPDATE games SET status = 'ended', finished_at = ?
+     WHERE id = (SELECT game_id FROM rooms WHERE id = ? AND status = 'playing') AND status = 'playing'
+       AND NOT EXISTS (SELECT 1 FROM room_members m, json_each(games.seats) s WHERE m.room_id = ? AND m.player_id = s.value)`,
+  ).bind(now, id, id),
+  env.DB.prepare(
+    "UPDATE rooms SET status = 'finished', updated_at = ? WHERE id = ? AND status = 'playing' AND (SELECT status FROM games WHERE id = rooms.game_id) = 'ended'",
+  ).bind(now, id),
+  env.DB.prepare(
+    `UPDATE rooms SET host_id = (SELECT player_id FROM room_members WHERE room_id = rooms.id ORDER BY joined_at LIMIT 1), updated_at = ?
+     WHERE id = ? AND host_id NOT IN (SELECT player_id FROM room_members WHERE room_id = rooms.id)
+       AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id)`,
+  ).bind(now, id),
+  env.DB.prepare("UPDATE rooms SET status = 'closed', updated_at = ? WHERE id = ? AND NOT EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id)").bind(now, id),
+];
+
+/** Leaves the room, also mid-game. One round trip, with no room to read back. */
+const leaveRoom = async (req: Request, env: Env, id: string) => {
+  const tokenHash = await tokenHashOf(req);
+  const now = Date.now();
+  const res = await env.DB.batch([
+    env.DB.prepare('SELECT id FROM players WHERE token_hash = ?').bind(tokenHash),
+    ...removeStatements(env, id, { sql: ME, params: [tokenHash] }, now),
+  ]);
+  if (!res[0].results?.length) throw new HttpError(401, 'Unknown token');
   return json({ ok: true });
 };
 
-/** The host takes another player out of the room. */
-const removePlayer = async (req: Request, me: PlayerRow, env: Env, id: string) => {
-  const r = await loadRoom(env, id);
-  requireHost(r, me);
-  const target = String((await body(req)).playerId ?? '');
-  if (target === me.id) throw new HttpError(400, 'Use Leave room to leave yourself');
-  if (!(await loadMembers(env, r.id)).some((m) => m.player_id === target)) throw new HttpError(404, 'That player is not in the room');
-  await removeMember(env, r, target);
-  return memberView(env, id, me);
+/** The host takes another player out of the room, the same way as leaving. */
+const removePlayer = async (req: Request, env: Env, id: string) => {
+  const [tokenHash, data] = await Promise.all([tokenHashOf(req), body(req)]);
+  const target = String(data.playerId ?? '');
+  const st = await runAsMember(env, { id }, tokenHash, {
+    // Only the host, and not themselves: otherwise `who` selects nobody and nothing changes.
+    writes: (_R, now) =>
+      removeStatements(env, id, { sql: `(SELECT ? WHERE (SELECT host_id FROM rooms WHERE id = ?) = ${ME} AND ? != ${ME})`, params: [target, id, tokenHash, target, tokenHash] }, now),
+  });
+  requireHost(st);
+  if (target === st.me.id) throw new HttpError(400, 'Use Leave room to leave yourself');
+  return json(buildView(st, st.me.id));
 };
 
 /** The room this player was in most recently, so a reload can return to it. */
-const currentRoom = async (me: PlayerRow, env: Env) => {
-  const r = await env.DB.prepare(
-    "SELECT r.id FROM rooms r JOIN room_members m ON m.room_id = r.id WHERE m.player_id = ? AND r.status != 'closed' AND r.updated_at > ? ORDER BY m.last_seen DESC LIMIT 1",
-  )
-    .bind(me.id, Date.now() - ROOM_TTL_MS)
-    .first<{ id: string }>();
-  return json({ room: r ? buildView(await loadState(env, { id: r.id }, { who: { id: me.id } }), me.id) : null });
+const currentRoom = async (req: Request, env: Env) => {
+  const tokenHash = await tokenHashOf(req);
+  const now = Date.now();
+  try {
+    const st = await run(
+      env,
+      {
+        sql: `(SELECT r.id FROM rooms r JOIN room_members m ON m.room_id = r.id WHERE m.player_id = ${ME} AND r.status != 'closed' AND r.updated_at > ? ORDER BY m.last_seen DESC LIMIT 1)`,
+        params: [tokenHash, now - ROOM_TTL_MS],
+      },
+      { tokenHash },
+    );
+    return json({ room: buildView(st, st.me!.id) });
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) return json({ room: null });
+    throw e;
+  }
 };
 
 // ------------------------------------------------------------------ playing
@@ -684,9 +743,7 @@ const currentRoom = async (me: PlayerRow, env: Env) => {
  * stale phone, or time ran out) the room as it is, moved on if it's due.
  */
 const beginMove = async (req: Request, env: Env, id: string, data: Record<string, unknown>, phase: Phase) => {
-  const st = await loadState(env, { id }, { who: { tokenHash: await tokenHashOf(req) }, seen: true });
-  if (!st.me) throw new HttpError(401, 'Unknown token');
-  requireMember(st, st.me.id);
+  const st = await runAsMember(env, { id }, await tokenHashOf(req), { seen: true });
   const play = playing(st);
   const now = Date.now();
   const stale = !play || play.g.phase !== phase || Number(data.round) !== play.g.round || (phase !== 'draw' && Number(data.step) !== play.g.step);
@@ -766,9 +823,8 @@ const vote = async (req: Request, env: Env, id: string) => {
 /** The host moves the game on without waiting (for the timer, or for someone who is away). */
 const skip = async (req: Request, env: Env, id: string) => {
   const data = await body(req);
-  const st = await loadState(env, { id }, { who: { tokenHash: await tokenHashOf(req) }, seen: true });
-  if (!st.me) throw new HttpError(401, 'Unknown token');
-  requireHost(st.room, st.me);
+  const st = await runAsMember(env, { id }, await tokenHashOf(req), { seen: true });
+  requireHost(st);
   const play = playing(st);
   if (!play || play.g.phase !== data.phase || play.g.round !== Number(data.round) || play.g.step !== Number(data.step)) return json(buildView(st, st.me.id));
   const now = Date.now();
@@ -798,7 +854,7 @@ const route = async (req: Request, env: Env): Promise<Response> => {
   const drawing = path.match(/^\/api\/drawings\/([0-9a-f]{16})$/);
   if (drawing && method === 'GET') return getDrawing(env, drawing[1]);
 
-  // The calls made during a game identify the player inside their first batch: no extra round trip.
+  // Every call identifies the player inside its first batch: no extra round trip.
   const fast = path.match(/^\/api\/rooms\/([0-9a-f]{16})(?:\/(draw|fib|vote|next))?$/);
   if (fast && !fast[2] && method === 'GET') return getRoom(req, env, fast[1]);
   if (fast && fast[2] && method === 'POST') {
@@ -814,26 +870,26 @@ const route = async (req: Request, env: Env): Promise<Response> => {
     }
   }
 
-  const me = await authenticate(req, env);
-  if (path === '/api/me' && method === 'GET') return json({ player: me });
-  if (path === '/api/me' && method === 'POST') return renamePlayer(req, me, env);
-  if (path === '/api/me/room' && method === 'GET') return currentRoom(me, env);
-  if (path === '/api/rooms' && method === 'POST') return createRoom(req, me, env);
-  if (path === '/api/rooms/join' && method === 'POST') return joinRoom(req, me, env);
+  // Every other call identifies the player inside its single batch too.
+  if (path === '/api/me' && method === 'GET') return whoAmI(req, env);
+  if (path === '/api/me' && method === 'POST') return renamePlayer(req, env);
+  if (path === '/api/me/room' && method === 'GET') return currentRoom(req, env);
+  if (path === '/api/rooms' && method === 'POST') return createRoom(req, env);
+  if (path === '/api/rooms/join' && method === 'POST') return joinRoom(req, env);
   const room = path.match(/^\/api\/rooms\/([0-9a-f]{16})\/(settings|start|end|leave|remove)$/);
   if (room && method === 'POST') {
     const id = room[1];
     switch (room[2]) {
       case 'settings':
-        return changeSettings(req, me, env, id);
+        return changeSettings(req, env, id);
       case 'start':
-        return startGame(me, env, id);
+        return startGame(req, env, id);
       case 'end':
-        return endGame(me, env, id);
+        return endGame(req, env, id);
       case 'leave':
-        return leaveRoom(me, env, id);
+        return leaveRoom(req, env, id);
       case 'remove':
-        return removePlayer(req, me, env, id);
+        return removePlayer(req, env, id);
     }
   }
   throw new HttpError(404, 'Not found');
@@ -841,32 +897,42 @@ const route = async (req: Request, env: Env): Promise<Response> => {
 
 /**
  * Wraps the database to count round trips (each run/first/all, or one batch), so every
- * response can report them in an `x-db-trips` header: latency grows with each one.
+ * response can report them in an `x-db-trips` header: latency grows with each one. It also
+ * counts the rows that batches and `run` calls changed (`x-db-writes`), so a poll can be
+ * seen to write nothing.
  */
 const countingDb = (db: D1Database) => {
-  const counter = { trips: 0 };
+  const counter = { trips: 0, writes: 0 };
+  const changed = (r: unknown) => (counter.writes += Number((r as D1Result | null)?.meta?.changes ?? 0));
   const real = new WeakMap<object, D1PreparedStatement>();
-  const wrap = (st: D1PreparedStatement): D1PreparedStatement => {
+  /** Whether each statement writes: a SELECT's result can still carry a stale `changes`. */
+  const writes = new WeakMap<object, boolean>();
+  const wrap = (st: D1PreparedStatement, isWrite: boolean): D1PreparedStatement => {
     const proxy = new Proxy(st, {
       get(target, key) {
-        if (key === 'bind') return (...args: unknown[]) => wrap(target.bind(...args));
+        if (key === 'bind') return (...args: unknown[]) => wrap(target.bind(...args), isWrite);
         if (key === 'run' || key === 'first' || key === 'all' || key === 'raw')
-          return (...args: unknown[]) => {
+          return async (...args: unknown[]) => {
             counter.trips++;
-            return (target[key] as (...a: unknown[]) => unknown).apply(target, args);
+            const r = await (target[key] as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+            if (key === 'run' && isWrite) changed(r);
+            return r;
           };
         const value = Reflect.get(target, key, target);
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
     real.set(proxy, st);
+    writes.set(proxy, isWrite);
     return proxy;
   };
   const wrapped = {
-    prepare: (query: string) => wrap(db.prepare(query)),
-    batch: (statements: D1PreparedStatement[]) => {
+    prepare: (query: string) => wrap(db.prepare(query), /^\s*(insert|update|delete)\b/i.test(query)),
+    batch: async (statements: D1PreparedStatement[]) => {
       counter.trips++;
-      return db.batch(statements.map((x) => real.get(x) ?? x));
+      const results = await db.batch(statements.map((x) => real.get(x) ?? x));
+      results.forEach((r, i) => writes.get(statements[i]) && changed(r));
+      return results;
     },
     exec: (query: string) => {
       counter.trips++;
@@ -890,6 +956,7 @@ export default {
       }
     }
     res.headers.set('x-db-trips', String(counter.trips));
+    res.headers.set('x-db-writes', String(counter.writes));
     return res;
   },
 } satisfies ExportedHandler<Env>;

@@ -2,7 +2,7 @@ import { readyUntil } from '../engine/game';
 import { api, ApiError, linkWith } from '../online/client';
 import type { GameView, RoomView } from '../online/types';
 import { galleryHtml } from './app';
-import { clockHtml, countdownHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, qrSvg, ranking, scoreboardHtml, settingsLine, sleep, textHtml, tickClocks, winnerHtml } from './parts';
+import { clockHtml, countdownHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, pollPause, qrSvg, ranking, scoreboardHtml, settingsLine, textHtml, tickClocks, winnerHtml } from './parts';
 import { fillPictures, pictureHtml, showPicture, watchPictures } from './picture';
 import { revealHtml, revealStage } from './reveal';
 
@@ -105,7 +105,7 @@ export class TvApp {
         if (e instanceof ApiError && e.status === 404) return this.entry(first ? `No room with the code ${code}.` : `Room ${code} has ended.`);
         if (++failures === 5) this.root.querySelector('.tv-offline')?.removeAttribute('hidden');
       }
-      await sleep(POLL_MS);
+      await pollPause(POLL_MS);
     }
   }
 
