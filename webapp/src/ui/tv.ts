@@ -1,7 +1,8 @@
+import { readyUntil } from '../engine/game';
 import { api, ApiError, linkWith } from '../online/client';
 import type { GameView, RoomView } from '../online/types';
 import { galleryHtml } from './app';
-import { clockHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, qrSvg, ranking, scoreboardHtml, settingsLine, sleep, textHtml, tickClocks, winnerHtml } from './parts';
+import { clockHtml, countdownHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, qrSvg, ranking, scoreboardHtml, settingsLine, sleep, textHtml, tickClocks, winnerHtml } from './parts';
 import { fillPictures, pictureHtml, showPicture, watchPictures } from './picture';
 import { revealHtml, revealStage } from './reveal';
 
@@ -118,6 +119,8 @@ export class TvApp {
     const g = room?.game;
     if (!room || !g) return;
     if (room.status === 'playing' && g.phase === 'reveal') this.renderReveal(room, g);
+    // The countdown before the first drawing: show the drawing the moment it ends.
+    if (room.status === 'playing' && this.serverNow < readyUntil(g) + 600) this.renderGame(room, g);
     if (room.status === 'finished' && g.gallery?.length && Date.now() - this.slideAt > GALLERY_MS) this.nextSlide(g);
   }
 
@@ -181,24 +184,36 @@ export class TvApp {
       game.phase === 'draw'
         ? `Round ${fixed(`${game.round + 1}/${game.rounds}`)}`
         : `Round ${fixed(`${game.round + 1}/${game.rounds}`)} · Drawing ${fixed(`${game.step + 1}/${game.steps}`)}`;
-    const what = {
-      draw: 'Everyone, draw your secret prompt!',
-      fib: 'What is this? Write a fake title on your phone',
-      vote: 'Which is the real title? Vote on your phone',
-      reveal: 'The reveal',
-      over: 'Game over',
-    }[game.phase];
+    const ready = this.serverNow < readyUntil(game);
+    const what = ready
+      ? 'All the drawings are in! Get ready…'
+      : {
+          draw: 'Everyone, draw your secret prompt!',
+          fib: 'What is this? Write a fake title on your phone',
+          vote: 'Which is the real title? Vote on your phone',
+          reveal: 'The reveal',
+          over: 'Game over',
+        }[game.phase];
+    const timed = game.phase !== 'reveal' && !ready;
     patch(
       this.root.querySelector('.tv-top'),
       `${this.titleHtml(room)}<div class="tv-phase"><p class="tv-where">${where}</p><h1>${what}</h1></div>${
-        game.phase === 'reveal' ? '<span class="tv-clock-spacer"></span>' : `<div class="tv-clock">${clockHtml(game.endsAt, this.serverNow)}</div>`
+        timed ? `<div class="tv-clock">${clockHtml(game.endsAt, this.serverNow)}</div>` : '<span class="tv-clock-spacer"></span>'
       }`,
     );
     const stage = this.root.querySelector<HTMLElement>('.tv-stage')!;
     const artist = game.drawing ? room.members[game.drawing.artist] : undefined;
     const by = artist ? `<p class="tv-byline">by ${nameHtml(artist.nickname)}</p>` : '';
     let html: string;
-    switch (game.phase) {
+    switch (ready ? 'ready' : game.phase) {
+      case 'ready':
+        // The drawing stays hidden until the countdown ends, so nobody gets a head start.
+        html = `<div class="tv-ready"><p class="tv-lead">Next: write a fake title for each drawing on your phone</p>${countdownHtml(
+          readyUntil(game),
+          this.serverNow,
+          'big',
+        )}</div>`;
+        break;
       case 'draw':
         html = `<div class="tv-drawing-time"><p class="big-emoji">✏️</p><p class="tv-lead">Draw it so the others can guess it, but not <i>too</i> easily…</p></div>`;
         break;
@@ -219,10 +234,13 @@ export class TvApp {
     if (patch(stage, html)) fillPictures(stage);
     else for (const box of stage.querySelectorAll<HTMLElement>('[data-picture]')) showPicture(box, box.dataset.picture || null);
     if (game.phase === 'reveal') this.renderReveal(room, game);
-    const status = game.phase === 'draw' || game.phase === 'fib' || game.phase === 'vote';
+    // During the countdown: the scores, not whose drawing comes first.
+    const status = !ready && (game.phase === 'draw' || game.phase === 'fib' || game.phase === 'vote');
     patch(
       this.root.querySelector('.tv-bottom'),
-      `<ul class="members row">${(status ? room.members : ranking(room.members)).map((m) => memberHtml(m, { status, score: !status })).join('')}</ul>`,
+      `<ul class="members row">${(status ? room.members : ranking(room.members))
+        .map((m) => memberHtml(ready ? { ...m, artist: false } : m, { status, score: !status }))
+        .join('')}</ul>`,
     );
     tickClocks(this.root, this.clockOffset);
   }

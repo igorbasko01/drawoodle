@@ -1,6 +1,6 @@
 // Plays a whole game between four scripted players, with a TV watching, against a running server.
 // Usage: npx tsx test/e2e.ts [http://localhost:8787]
-import { POINTS } from '../../webapp/src/engine/game';
+import { POINTS, READY_MS, TIMES } from '../../webapp/src/engine/game';
 import type { RoomView } from '../../webapp/src/online/types';
 
 const base = process.argv[2] ?? 'http://localhost:8787';
@@ -83,6 +83,7 @@ const main = async () => {
   await Promise.all([call(`/api/rooms/${id}/draw`, c.token, { round: 0, drawing: doodle(2) }), call(`/api/rooms/${id}/draw`, d.token, { round: 0, drawing: doodle(3) })]);
   room = await call(`/api/rooms/${id}`, a.token);
   assert(room.game!.phase === 'fib' && room.game!.step === 0 && room.game!.steps === 4, 'once everyone has drawn, the first drawing is shown');
+  assert(room.game!.endsAt - room.game!.phaseAt === READY_MS + TIMES.normal.fib * 1000, 'the first drawing starts with a short countdown, added to the time for fake titles');
 
   const drawingRes = await request(`/api/drawings/${room.game!.drawing!.id}`);
   assert(Array.isArray(drawingRes.body.s) && /immutable/.test(drawingRes.headers.get('cache-control') ?? ''), 'a drawing’s strokes are fetched once and cached');

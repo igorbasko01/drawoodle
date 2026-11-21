@@ -78,14 +78,21 @@ export const scoreboardHtml = (members: MemberView[], gains: number[] | null = n
 export const clockHtml = (endsAt: number, serverNow: number) =>
   `<span class="clock notranslate" translate="no" data-ends="${endsAt}">${Math.max(0, Math.ceil((endsAt - serverNow) / 1000))}</span>`;
 
+/** The big "get ready" number before the first drawing; kept ticking by tickClocks. */
+export const countdownHtml = (until: number, serverNow: number, cls = '') =>
+  `<span class="countdown notranslate ${cls}" translate="no" data-ends="${until}">${Math.max(1, Math.ceil((until - serverNow) / 1000))}</span>`;
+
 /** Keeps every on-screen countdown ticking between server updates. Only numbers change: nothing to retranslate. */
 export const tickClocks = (root: HTMLElement, clockOffset: number) => {
   const now = Date.now() + clockOffset;
-  for (const el of root.querySelectorAll<HTMLElement>('.clock[data-ends]')) {
-    const left = Math.max(0, Math.ceil((Number(el.dataset.ends) - now) / 1000));
+  for (const el of root.querySelectorAll<HTMLElement>('.clock[data-ends], .countdown[data-ends]')) {
+    const ms = Number(el.dataset.ends) - now;
+    const countdown = el.classList.contains('countdown');
+    // A countdown says 3, 2, 1 and never 0: the screen moves on as it ends.
+    const left = countdown ? Math.max(1, Math.ceil(ms / 1000)) : Math.max(0, Math.ceil(ms / 1000));
     const text = String(left);
     if (el.textContent !== text) el.textContent = text;
-    el.classList.toggle('hurry', left <= 10);
+    if (!countdown) el.classList.toggle('hurry', left <= 10);
   }
 };
 

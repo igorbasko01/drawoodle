@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { checkDrawing, simplify } from './drawing';
-import { dealPrompts, nextPosition, normalize, optionsFor, POINTS, revealOrder, scoreDrawing, TIMES } from './game';
+import { dealPrompts, nextPosition, normalize, optionsFor, POINTS, READY_MS, readyUntil, revealOrder, scoreDrawing, TIMES } from './game';
 import { PACKS } from './prompts';
 
 describe('prompts', () => {
@@ -76,12 +76,17 @@ describe('scoring', () => {
 describe('flow', () => {
   const ctx = { rounds: 2, drawings: 3, options: 4, pace: 'normal' as const, now: 1000 };
   it('goes draw → fib → vote → reveal for every drawing, then the next round', () => {
-    expect(nextPosition({ round: 0, phase: 'draw', step: 0 }, ctx)).toEqual({ round: 0, phase: 'fib', step: 0, endsAt: 1000 + TIMES.normal.fib * 1000 });
+    expect(nextPosition({ round: 0, phase: 'draw', step: 0 }, ctx)).toEqual({ round: 0, phase: 'fib', step: 0, endsAt: 1000 + READY_MS + TIMES.normal.fib * 1000 });
     expect(nextPosition({ round: 0, phase: 'fib', step: 1 }, ctx).phase).toBe('vote');
     expect(nextPosition({ round: 0, phase: 'vote', step: 1 }, ctx).phase).toBe('reveal');
-    expect(nextPosition({ round: 0, phase: 'reveal', step: 1 }, ctx)).toMatchObject({ phase: 'fib', step: 2 });
+    expect(nextPosition({ round: 0, phase: 'reveal', step: 1 }, ctx)).toEqual({ round: 0, phase: 'fib', step: 2, endsAt: 1000 + TIMES.normal.fib * 1000 });
     expect(nextPosition({ round: 0, phase: 'reveal', step: 2 }, ctx)).toMatchObject({ round: 1, phase: 'draw', step: 0 });
     expect(nextPosition({ round: 1, phase: 'reveal', step: 2 }, ctx)).toMatchObject({ round: 1, phase: 'over' });
+  });
+  it('counts down only before the first drawing of a round', () => {
+    expect(readyUntil({ phase: 'fib', step: 0, phaseAt: 500 })).toBe(500 + READY_MS);
+    expect(readyUntil({ phase: 'fib', step: 1, phaseAt: 500 })).toBe(0);
+    expect(readyUntil({ phase: 'vote', step: 0, phaseAt: 500 })).toBe(0);
   });
   it('skips a round without drawings', () => {
     expect(nextPosition({ round: 0, phase: 'draw', step: 0 }, { ...ctx, drawings: 0 })).toMatchObject({ round: 1, phase: 'draw' });

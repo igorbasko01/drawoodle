@@ -939,6 +939,28 @@ input:focus {
   margin: 0;
 }
 
+.ready-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px 18px;
+  text-align: center;
+}
+
+.ready-card p {
+  margin: 4px 0;
+}
+
+.countdown {
+  display: block;
+  margin-top: 12px;
+  font-size: 5rem;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .sent-fib {
   font-size: 1.3rem;
   font-weight: 900;
@@ -1413,6 +1435,21 @@ input:focus {
 
 .tv-drawing-time .tv-lead {
   font-size: 3.6vh;
+}
+
+.tv-ready {
+  text-align: center;
+}
+
+.tv-ready .tv-lead {
+  font-size: 4vh;
+}
+
+.countdown.big {
+  font-size: 30vh;
+  margin-top: 3vh;
+  -webkit-animation: bob 1s ease-in-out infinite;
+  animation: bob 1s ease-in-out infinite;
 }
 
 .tv-split {
