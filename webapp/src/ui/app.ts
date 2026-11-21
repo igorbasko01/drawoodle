@@ -178,17 +178,31 @@ export class PhoneApp {
     });
     root.querySelector('[data-tv]')!.addEventListener('click', () => this.openTv());
     root.querySelector('[data-rename]')!.addEventListener('click', async () => {
-      const nickname = prompt('Your name', me.nickname)?.trim();
-      if (!nickname) return;
-      try {
-        const { player } = await api.rename(this.token, nickname);
-        this.identity = { ...this.identity!, player };
-        saveIdentity(this.identity);
-        this.home();
-      } catch (e) {
-        this.fail(e);
-      }
+      if (await this.rename()) this.home();
     });
+  }
+
+  /** Asks for a new name and saves it. Names are read fresh for every room view, so everyone sees it at their next update. */
+  private async rename() {
+    const me = this.identity!.player;
+    const nickname = prompt('Your name', me.nickname)?.trim();
+    if (!nickname || nickname === me.nickname) return false;
+    try {
+      const { player } = await api.rename(this.token, nickname);
+      this.identity = { ...this.identity!, player };
+      saveIdentity(this.identity);
+      return true;
+    } catch (e) {
+      this.fail(e);
+      return false;
+    }
+  }
+
+  /** Renaming from inside a room: show the room again with the new name straight away. */
+  private async renameInRoom() {
+    const room = this.room;
+    if (!room || !(await this.rename())) return;
+    await this.send(() => api.room(this.token, room.id));
   }
 
   private async joinCode(code: string) {
@@ -270,6 +284,7 @@ export class PhoneApp {
               <summary aria-label="Menu">⋯</summary>
               <div class="menu-items">
                 <button data-share>Invite players</button>
+                <button data-rename>Change my name</button>
                 <button data-skip hidden>Skip ahead ⏭</button>
                 <button data-end hidden>End game</button>
                 <div class="menu-remove"></div>
@@ -288,6 +303,7 @@ export class PhoneApp {
       this.root.querySelector('[data-leave]')!.addEventListener('click', () => this.leave());
       this.root.querySelector('[data-end]')!.addEventListener('click', () => this.endGame());
       this.root.querySelector('[data-skip]')!.addEventListener('click', () => this.skip());
+      this.root.querySelector('.room-bar [data-rename]')!.addEventListener('click', () => this.renameInRoom());
       this.root.querySelector('[data-share]')!.addEventListener('click', () => this.share());
       for (const b of this.root.querySelectorAll('.menu-items button'))
         b.addEventListener('click', () => this.root.querySelector<HTMLDetailsElement>('.menu')!.removeAttribute('open'));
@@ -410,6 +426,7 @@ export class PhoneApp {
           <h2>${finished ? 'Next game' : 'Players'} <small>${fixed(`${next.length}/${MAX_PLAYERS}`)}</small></h2>
           ${lobbySlotsHtml(room, true)}
           ${next.length < MAX_PLAYERS ? `<button class="secondary wide" data-invite>Invite players · code ${fixed(room.code, 'code')}</button>` : ''}
+          <p class="rename-line"><button class="link" data-rename-lobby>Change my name</button></p>
         </section>
         <section class="panel">
           <h2>Game</h2>
@@ -453,6 +470,7 @@ export class PhoneApp {
     if (!changed) return;
     fillPictures(body);
     body.querySelector('[data-invite]')?.addEventListener('click', () => this.share());
+    body.querySelector('[data-rename-lobby]')?.addEventListener('click', () => this.renameInRoom());
     body.querySelector('[data-start]')?.addEventListener('click', async (ev) => {
       const b = ev.currentTarget as HTMLButtonElement;
       b.disabled = true;

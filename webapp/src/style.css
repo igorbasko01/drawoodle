@@ -509,6 +509,11 @@ input:focus {
   color: var(--accent-ink);
 }
 
+.rename-line {
+  text-align: center;
+  margin: 12px 0 0;
+}
+
 .panel > .muted {
   margin-top: 10px;
 }
