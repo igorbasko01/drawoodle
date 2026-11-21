@@ -40,6 +40,11 @@ const main = async () => {
   assert((await request(`/api/rooms/${id}/start`, a.token, {})).status === 400, 'a game needs at least three players');
   await call('/api/rooms/join', c.token, { code });
   let room: RoomView = await call('/api/rooms/join', d.token, { code });
+  await call('/api/me', d.token, { nickname: 'Dina' });
+  room = await call(`/api/rooms/${id}`, a.token);
+  assert(room.members[3].nickname === 'Dina', 'a player who joined can change their name, and everyone sees it');
+  await call('/api/me', d.token, { nickname: 'Dee' });
+  room = await call(`/api/rooms/${id}`, a.token);
   assert(room.members.map((m) => m.nickname).join() === 'Ana,Ben,Cy,Dee', 'players join in order');
   assert((await request(`/api/rooms/${id}/start`, b.token, {})).status === 403, 'only the host starts the game');
   await call(`/api/rooms/${id}/settings`, a.token, { pack: 'he' });
@@ -56,6 +61,9 @@ const main = async () => {
   const g0 = room.game!;
   assert(room.status === 'playing' && g0.phase === 'draw' && g0.round === 0 && !!g0.prompt, 'the game starts with drawing, and you see your prompt');
   assert((await request('/api/rooms/join', ps[4].token, { code })).status === 409, 'nobody joins a game in progress');
+  await call('/api/me', b.token, { nickname: 'Benny' });
+  assert((await call(`/api/tv/${code}`)).members[1].nickname === 'Benny', 'a name can be changed during a game too');
+  await call('/api/me', b.token, { nickname: 'Ben' });
   const tokens = [a.token, b.token, c.token, d.token];
   const prompts: string[] = [];
   for (const t of tokens) prompts.push((await call(`/api/rooms/${id}`, t)).game.prompt);

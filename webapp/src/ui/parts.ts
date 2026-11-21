@@ -106,7 +106,7 @@ export const lobbySlotsHtml = (room: RoomView, compact = false) => {
     const m = next[seat];
     slots.push(
       m
-        ? memberHtml({ ...m, seat })
+        ? memberHtml({ ...m, seat }, { you: room.you })
         : `<li class="member empty" style="--seat-color:${seatColor(seat)}"><span class="avatar">?</span><span class="member-name">Waiting for a player…</span></li>`,
     );
   }
