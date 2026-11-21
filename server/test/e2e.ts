@@ -11,7 +11,13 @@ const request = async (path: string, token?: string, data?: unknown) => {
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: data === undefined ? undefined : JSON.stringify(data),
   });
-  return { status: res.status, body: (await res.json()) as any, trips: Number(res.headers.get('x-db-trips')), headers: res.headers };
+  return {
+    status: res.status,
+    body: (await res.json()) as any,
+    trips: Number(res.headers.get('x-db-trips')),
+    writes: Number(res.headers.get('x-db-writes')),
+    headers: res.headers,
+  };
 };
 
 const call = async (path: string, token?: string, data?: unknown) => {
@@ -25,6 +31,14 @@ const assert = (ok: unknown, msg: string) => {
   console.log(`ok - ${msg}`);
 };
 
+/** A call that must succeed in one database round trip. */
+const once = async (what: string, path: string, token?: string, data?: unknown) => {
+  const r = await request(path, token, data);
+  if (r.status >= 400) throw new Error(`${path}: ${r.status} ${JSON.stringify(r.body)}`);
+  assert(r.trips === 1, `${what} is one database round trip`);
+  return r.body;
+};
+
 const doodle = (n: number) => ({ v: 1, s: [[n % 8, 1, 100, 100, 300 + n * 10, 400, 600, 650]] });
 
 const main = async () => {
@@ -32,22 +46,22 @@ const main = async () => {
   const ps = await Promise.all(names.map((nickname) => call('/api/players', undefined, { nickname })));
   const [a, b, c, d] = ps;
   assert(ps[9].player.nickname === 'נועה', 'Hebrew nicknames are kept');
-  const created: RoomView = await call('/api/rooms', a.token, { rounds: 1, pace: 'normal', pack: 'en' });
+  const created: RoomView = await once('creating a room', '/api/rooms', a.token, { rounds: 1, pace: 'normal', pack: 'en' });
   assert(created.status === 'lobby' && created.code.length === 4 && created.settings.rounds === 1, 'room waits in the lobby with a code');
   const id = created.id;
   const code = created.code;
-  await call('/api/rooms/join', b.token, { code: code.toLowerCase() });
+  await once('joining a room', '/api/rooms/join', b.token, { code: code.toLowerCase() });
   assert((await request(`/api/rooms/${id}/start`, a.token, {})).status === 400, 'a game needs at least three players');
   await call('/api/rooms/join', c.token, { code });
   let room: RoomView = await call('/api/rooms/join', d.token, { code });
-  await call('/api/me', d.token, { nickname: 'Dina' });
+  await once('renaming', '/api/me', d.token, { nickname: 'Dina' });
   room = await call(`/api/rooms/${id}`, a.token);
   assert(room.members[3].nickname === 'Dina', 'a player who joined can change their name, and everyone sees it');
   await call('/api/me', d.token, { nickname: 'Dee' });
   room = await call(`/api/rooms/${id}`, a.token);
   assert(room.members.map((m) => m.nickname).join() === 'Ana,Ben,Cy,Dee', 'players join in order');
   assert((await request(`/api/rooms/${id}/start`, b.token, {})).status === 403, 'only the host starts the game');
-  await call(`/api/rooms/${id}/settings`, a.token, { pack: 'he' });
+  await once('changing the settings', `/api/rooms/${id}/settings`, a.token, { pack: 'he' });
   room = await call(`/api/rooms/${id}/settings`, a.token, { pack: 'en', rounds: 1 });
   assert(room.settings.pack === 'en', 'the host changes the settings');
 
@@ -57,7 +71,7 @@ const main = async () => {
   assert(room.tv, 'players see that a TV is connected');
 
   // Drawing: everyone has their own secret prompt.
-  room = await call(`/api/rooms/${id}/start`, a.token, {});
+  room = await once('starting a game', `/api/rooms/${id}/start`, a.token, {});
   const g0 = room.game!;
   assert(room.status === 'playing' && g0.phase === 'draw' && g0.round === 0 && !!g0.prompt, 'the game starts with drawing, and you see your prompt');
   assert((await request('/api/rooms/join', ps[4].token, { code })).status === 409, 'nobody joins a game in progress');
@@ -77,6 +91,10 @@ const main = async () => {
   assert(draw.status === 200 && draw.body.game.you.drew && draw.body.members[0].done, 'a drawing is handed in');
   assert(draw.trips === 2, 'handing in a drawing is two database round trips');
   assert((await request(`/api/rooms/${id}`, a.token)).trips === 1, 'a poll is one database round trip');
+  const quick = await request(`/api/rooms/${id}`, a.token);
+  assert(quick.writes === 0, 'a poll right after another writes nothing (last seen is only written every few seconds)');
+  const tvQuick = await request(`/api/tv/${code}`);
+  assert(tvQuick.writes === 0, 'a TV poll right after another writes nothing');
   assert((await request(`/api/tv/${code}`)).trips === 1, 'the TV view is one database round trip');
   await call(`/api/rooms/${id}/draw`, b.token, { round: 0, drawing: doodle(1) });
   // The last two drawings arrive together: the game moves on exactly once.
@@ -162,7 +180,7 @@ const main = async () => {
   assert(room.members.length === 8 && room.game!.phase === 'draw', 'play again with eight players');
 
   // Leaving mid-game: the game stops waiting for that player.
-  await call(`/api/rooms/${id}/leave`, ps[7].token, {});
+  await once('leaving', `/api/rooms/${id}/leave`, ps[7].token, {});
   room = await call(`/api/rooms/${id}`, a.token);
   assert(room.members[7].left, 'a player can leave a game in progress; their seat stays');
   for (const [i, p] of ps.slice(0, 7).entries()) room = await call(`/api/rooms/${id}/draw`, p.token, { round: 0, drawing: doodle(i) });
@@ -176,16 +194,22 @@ const main = async () => {
 
   // The host can remove a player; only the host.
   assert((await request(`/api/rooms/${id}/remove`, b.token, { playerId: d.player.id })).status === 403, 'only the host removes players');
-  room = await call(`/api/rooms/${id}/remove`, a.token, { playerId: d.player.id });
+  room = await once('removing a player', `/api/rooms/${id}/remove`, a.token, { playerId: d.player.id });
   assert(room.members[3].left && room.status === 'playing', 'the host removes a player; their seat stays in the game');
   assert((await request(`/api/rooms/${id}`, d.token)).status === 403, 'a removed player is out of the room');
-  room = await call(`/api/rooms/${id}/end`, a.token, {});
+  room = await once('ending a game', `/api/rooms/${id}/end`, a.token, {});
   assert(room.status === 'finished' && room.game?.status === 'ended', 'the host can end the game');
   await call(`/api/rooms/${id}/leave`, a.token, {});
   room = await call(`/api/rooms/${id}`, b.token);
   assert(room.hostId === b.player.id, 'the host passes on when they leave');
-  const current = await call('/api/me/room', c.token);
+  const current = await once('finding your room after a reload', '/api/me/room', c.token);
   assert(current.room?.id === id, 'a player returns to their room after a reload');
+  // Two players try to take the last place at the same moment: exactly one gets it.
+  const other: RoomView = await call('/api/rooms', ps[9].token, {});
+  for (const p of ps.slice(0, 6)) await call('/api/rooms/join', p.token, { code: other.code });
+  const race = await Promise.all([ps[6], ps[7]].map((p) => request('/api/rooms/join', p.token, { code: other.code })));
+  const full: RoomView = await call(`/api/rooms/${other.id}`, ps[9].token);
+  assert(race.map((r) => r.status).sort().join() === '200,409' && full.members.length === 8, 'two players joining the last place at once: one gets in, the room holds eight');
   console.log('\nAll good.');
 };
 

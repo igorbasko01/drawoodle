@@ -17,7 +17,7 @@ import {
   ranking,
   scoreboardHtml,
   settingsLine,
-  sleep,
+  pollPause,
   textHtml,
   tickClocks,
   winnerHtml,
@@ -199,11 +199,15 @@ export class PhoneApp {
     }
   }
 
-  /** Renaming from inside a room: show the room again with the new name straight away. */
+  /** Renaming from inside a room: show the new name straight away; the next poll confirms it. */
   private async renameInRoom() {
+    if (!this.room || !(await this.rename())) return;
     const room = this.room;
-    if (!room || !(await this.rename())) return;
-    await this.send(() => api.room(this.token, room.id));
+    if (!room) return;
+    const me = this.identity!.player;
+    const rename = <T extends { id: string; nickname: string }>(m: T) => (m.id === me.id ? { ...m, nickname: me.nickname } : m);
+    this.moves++;
+    this.apply({ ...room, members: room.members.map(rename), waiting: room.waiting.map(rename) });
   }
 
   private async joinCode(code: string) {
@@ -247,7 +251,7 @@ export class PhoneApp {
 
   private async poll(generation: number) {
     while (generation === this.generation) {
-      await sleep(POLL_MS);
+      await pollPause(POLL_MS);
       if (generation !== this.generation || !this.room || this.pending) continue;
       const moves = this.moves;
       try {

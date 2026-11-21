@@ -26,6 +26,8 @@ All endpoints except creating a player, the TV view and drawings need `Authoriza
 | `GET /api/tv/:code` | The TV view of a room, no account needed. Marks a TV as connected, and moves the game on too |
 | `GET /api/drawings/:id` | A drawing's strokes; never changes, cached as `immutable` |
 
+Each call is one database round trip (a single D1 batch, which is also a transaction), except a drawing, fake title or vote, which is two (read, then write), and a poll that moves the game on. Responses report their round trips in `x-db-trips` and the rows they changed in `x-db-writes`.
+
 Moves for a phase or drawing that is no longer current are ignored, and the answer is the room as it is now. Submissions are accepted for 2.5 seconds after a phase's timer runs out, because phones hand in what they have just before the end.
 
 ## Rules the server enforces

@@ -7,7 +7,25 @@ export const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', 
 export const SEAT_COLORS = ['#ff5d8f', '#3ec7ff', '#ffd23f', '#5ee08a', '#b78cff', '#ff8a3d', '#2ee6d6', '#f2f2f2'];
 export const seatColor = (seat: number) => SEAT_COLORS[((seat % SEAT_COLORS.length) + SEAT_COLORS.length) % SEAT_COLORS.length];
 
-export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** How often a screen in the background (phone locked, another tab) polls: it can't be watched, so there's no hurry. */
+export const HIDDEN_POLL_MS = 5000;
+
+/**
+ * The pause between two polls: `ms` while the page is in view, HIDDEN_POLL_MS while it's in
+ * the background, and it ends at once when the page comes back into view.
+ */
+export const pollPause = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const hidden = () => document.visibilityState === 'hidden';
+    const done = () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onChange);
+      resolve();
+    };
+    const onChange = () => !hidden() && done();
+    const timer = setTimeout(done, hidden() ? HIDDEN_POLL_MS : ms);
+    document.addEventListener('visibilitychange', onChange);
+  });
 
 /** Sets an element's HTML only when it changed: fewer repaints, and the browser's page translation isn't undone every second. */
 export const patch = (el: Element | null, html: string) => {
