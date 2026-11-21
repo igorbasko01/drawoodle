@@ -4,7 +4,7 @@ import type { GameView, RoomView } from '../online/types';
 import { galleryHtml } from './app';
 import { clockHtml, countdownHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, pollPause, qrSvg, ranking, scoreboardHtml, settingsLine, textHtml, tickClocks, winnerHtml } from './parts';
 import { fillPictures, pictureHtml, showPicture, watchPictures } from './picture';
-import { revealHtml, revealStage } from './reveal';
+import { revealHtml, revealStage, scoresSoFar } from './reveal';
 
 const POLL_MS = 800;
 const CODE_KEY = 'drawoodle-tv-code';
@@ -118,7 +118,8 @@ export class TvApp {
     const room = this.room;
     const g = room?.game;
     if (!room || !g) return;
-    if (room.status === 'playing' && g.phase === 'reveal') this.renderReveal(room, g);
+    // During the reveal the whole screen follows the clock: the reveal itself, and the scores under it.
+    if (room.status === 'playing' && g.phase === 'reveal') this.renderGame(room, g);
     // The countdown before the first drawing: show the drawing the moment it ends.
     if (room.status === 'playing' && this.serverNow < readyUntil(g) + 600) this.renderGame(room, g);
     if (room.status === 'finished' && g.gallery?.length && Date.now() - this.slideAt > GALLERY_MS) this.nextSlide(g);
@@ -238,7 +239,7 @@ export class TvApp {
     const status = !ready && (game.phase === 'draw' || game.phase === 'fib' || game.phase === 'vote');
     patch(
       this.root.querySelector('.tv-bottom'),
-      `<ul class="members row">${(status ? room.members : ranking(room.members))
+      `<ul class="members row">${(status ? room.members : ranking(scoresSoFar(room.members, game, this.serverNow)))
         .map((m) => memberHtml(ready ? { ...m, artist: false } : m, { status, score: !status }))
         .join('')}</ul>`,
     );

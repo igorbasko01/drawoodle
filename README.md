@@ -9,7 +9,7 @@ Play it at **https://drawoodle.baskorp.com**.
 - **Draw:** everyone gets a secret, silly prompt ("A snail winning a race") and draws it on their phone.
 - **Fake titles:** once everyone has drawn, a short 3-2-1 countdown gives everyone a moment to get ready (the TV keeps the first drawing hidden until it ends). Then the drawings are shown one at a time. For each, the other players write a fake title that could pass for the real one.
 - **Vote:** the real title is mixed in with the fakes, and everyone except the artist votes for the one they think is real.
-- **Reveal:** the titles are revealed one by one, showing who picked each and who wrote it, with the real one last.
+- **Reveal:** the titles are revealed one by one, at a pace everyone can follow on the TV: each title on its own, then who picked it, then who wrote it (about 7 seconds each), with the real one last. Scores under the reveal only change when it gets to the scoreboard.
 - **Points:** +1000 for finding the real title; +500 to whoever wrote a fake for every player it fooled; +500 to the artist for every player who found theirs. Identical fakes are merged and score for every author.
 - A game has 1–3 rounds (the host picks), with English or Hebrew prompts and a normal or relaxed pace. When it's over, the TV plays a gallery of every drawing with its real title.
 - Each phase has a timer. Phones hand in what they have when time runs out, and the game moves on as soon as everyone is done. The host can skip ahead, end the game, or remove a player; anyone can leave (and rejoin) mid-game, and the game stops waiting for them. Players can change their name at any time, from the room menu or the lobby, and everyone sees the new name at their next update.

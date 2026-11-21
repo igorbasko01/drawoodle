@@ -23,7 +23,7 @@ import {
   winnerHtml,
 } from './parts';
 import { fillPictures, pictureHtml, watchPictures } from './picture';
-import { revealHtml, revealStage, yourGainLine } from './reveal';
+import { revealHtml, revealStage, scoresSoFar, yourGainLine } from './reveal';
 
 const POLL_MS = 1000;
 /** Phones hand in what they have this long before time runs out (the server waits a little longer). */
@@ -244,7 +244,8 @@ export class PhoneApp {
   private tick() {
     tickClocks(this.root, this.clockOffset);
     const g = this.room?.game;
-    if (g && g.phase === 'reveal' && this.room?.status === 'playing') this.renderReveal(this.room, g);
+    // During the reveal the whole screen follows the clock: the reveal itself, and the scores under it.
+    if (g && g.phase === 'reveal' && this.room?.status === 'playing') this.renderGame(this.room, g);
     // The countdown before the first drawing: switch to the drawing the moment it ends, without waiting for a poll.
     if (g && this.room?.status === 'playing' && this.serverNow < readyUntil(g) + 600) this.renderGame(this.room, g);
   }
@@ -539,7 +540,7 @@ export class PhoneApp {
       foot,
       showStatus
         ? `<ul class="members mini">${room.members.map((m) => memberHtml(m, { you: room.you, status: true })).join('')}</ul>`
-        : `<ul class="members mini">${ranking(room.members)
+        : `<ul class="members mini">${ranking(scoresSoFar(room.members, game, this.serverNow))
             .map((m) => memberHtml(role === 'ready' ? { ...m, artist: false } : m, { you: room.you, score: true }))
             .join('')}</ul>`,
     );

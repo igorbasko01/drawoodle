@@ -1,19 +1,21 @@
-import { REVEAL } from '../engine/game';
+import { revealStageAt, type RevealStage } from '../engine/game';
 import type { GameView, MemberView, RevealItem } from '../online/types';
 import { facesHtml, fixed, nameHtml, scoreboardHtml, textHtml } from './parts';
 
 /** Where the reveal is, from the time since it began: the same moment on every screen. */
-export type Stage = { kind: 'intro' } | { kind: 'item'; k: number; sub: 0 | 1 | 2 } | { kind: 'scores' };
+export type Stage = RevealStage;
 
-export const revealStage = (game: GameView, serverNow: number): Stage => {
-  const items = game.reveal ?? [];
-  const t = serverNow - game.phaseAt;
-  if (t < REVEAL.introMs) return { kind: 'intro' };
-  const k = Math.floor((t - REVEAL.introMs) / REVEAL.perOptionMs);
-  if (k >= items.length) return { kind: 'scores' };
-  const within = t - REVEAL.introMs - k * REVEAL.perOptionMs;
-  return { kind: 'item', k, sub: within < 900 ? 0 : within < 1900 ? 1 : 2 };
-};
+export const revealStage = (game: GameView, serverNow: number): Stage => revealStageAt(game.reveal?.length ?? 0, serverNow - game.phaseAt);
+
+/**
+ * The players' scores as the strip under the reveal shows them: without this drawing's
+ * points until the reveal reaches the scores, so they don't give away who found the
+ * real title before the reveal gets there.
+ */
+export const scoresSoFar = (members: MemberView[], game: GameView, serverNow: number) =>
+  game.phase === 'reveal' && game.gains && revealStage(game, serverNow).kind !== 'scores'
+    ? members.map((m) => ({ ...m, score: m.score - (game.gains![m.seat] ?? 0) }))
+    : members;
 
 const names = (seats: number[], members: MemberView[]) => {
   const list = seats.map((s) => members[s]).filter(Boolean).map((m) => nameHtml(m.nickname));
