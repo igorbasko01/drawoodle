@@ -1,5 +1,7 @@
 import { readyUntil } from '../engine/game';
 import { api, ApiError, linkWith } from '../online/client';
+import { Director } from './director';
+import { Sound } from './sound';
 import type { GameView, RoomView } from '../online/types';
 import { galleryHtml } from './app';
 import { clockHtml, countdownHtml, esc, fixed, lobbySlotsHtml, memberHtml, nameHtml, nextPlayers, patch, pollPause, qrSvg, ranking, scoreboardHtml, settingsLine, textHtml, tickClocks, winnerHtml } from './parts';
@@ -25,8 +27,41 @@ export class TvApp {
   private slide = 0;
   private slideAt = 0;
 
+  /** The TV is where the game's sound plays: on by default. */
+  private readonly sound = new Sound(true);
+  private readonly director = new Director(this.sound);
+  private soundButton: HTMLButtonElement | null = null;
+
   constructor(private readonly root: HTMLElement) {
     watchPictures(root);
+    this.sound.unlockOnGesture();
+    this.sound.onChange(() => this.renderSoundButton());
+  }
+
+  /**
+   * A button in the corner for the sound. Browsers keep a page silent until someone presses
+   * something, so until then it asks for a press, and is focused so a remote's OK button
+   * presses it.
+   */
+  private renderSoundButton() {
+    if (!Sound.supported()) return;
+    if (!this.soundButton) {
+      const b = document.createElement('button');
+      b.className = 'sound-button';
+      b.setAttribute('data-sound-switch', '');
+      b.addEventListener('click', () => {
+        if (this.sound.on && !this.sound.playing) this.sound.unlock();
+        else this.sound.setEnabled(!this.sound.on);
+      });
+      document.body.appendChild(b);
+      this.soundButton = b;
+    }
+    const b = this.soundButton;
+    const waiting = this.sound.on && !this.sound.playing;
+    b.textContent = waiting ? '🔇 Press OK for sound' : this.sound.on ? '🔊' : '🔇';
+    b.setAttribute('aria-label', waiting ? 'Turn on sound' : this.sound.on ? 'Sound on: press to mute' : 'Sound off: press to turn on');
+    b.classList.toggle('asking', waiting);
+    if (waiting && this.room && document.activeElement !== b && !(document.activeElement instanceof HTMLInputElement)) b.focus();
   }
 
   start(code: string | null) {
@@ -44,6 +79,7 @@ export class TvApp {
 
   private stop() {
     this.generation++;
+    this.director.update(null, 0);
     this.layoutKey = '';
     this.room = null;
     clearInterval(this.tickTimer);
@@ -115,6 +151,7 @@ export class TvApp {
 
   private tick() {
     tickClocks(this.root, this.clockOffset);
+    this.director.update(this.room, this.serverNow);
     const room = this.room;
     const g = room?.game;
     if (!room || !g) return;
@@ -126,7 +163,9 @@ export class TvApp {
   }
 
   private apply(room: RoomView) {
+    const first = !this.room;
     this.room = room;
+    if (first) this.renderSoundButton();
     this.clockOffset = room.now - Date.now();
     const g = room.game;
     const playing = room.status === 'playing' && g;

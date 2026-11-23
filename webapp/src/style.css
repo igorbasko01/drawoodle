@@ -1679,6 +1679,37 @@ input:focus {
   margin: 0;
 }
 
+/* The TV's sound button, in the corner. */
+.sound-button {
+  position: fixed;
+  bottom: 2vh;
+  right: 2vw;
+  z-index: 40;
+  font-size: 2.4vh;
+  font-weight: 800;
+  padding: 1vh 2vh;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 0.3vh solid var(--line);
+  color: var(--text);
+}
+
+[dir='rtl'] .sound-button {
+  right: auto;
+  left: 2vw;
+}
+
+.sound-button.asking {
+  background: var(--accent);
+  color: var(--accent-ink);
+  -webkit-animation: bob 1.4s ease-in-out infinite;
+  animation: bob 1.4s ease-in-out infinite;
+}
+
+body:not(.tv-mode) .sound-button {
+  display: none;
+}
+
 /* ------------------------------------------------------------ old browsers without `gap` on flex layouts */
 
 .no-flex-gap .screen > * + *,

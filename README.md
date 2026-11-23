@@ -14,6 +14,16 @@ Play it at **https://drawoodle.baskorp.com**.
 - A game has 1–3 rounds (the host picks), with English or Hebrew prompts and a normal or relaxed pace. When it's over, the TV plays a gallery of every drawing with its real title.
 - Each phase has a timer. Phones hand in what they have when time runs out, and the game moves on as soon as everyone is done. The host can skip ahead, end the game, or remove a player; anyone can leave (and rejoin) mid-game, and the game stops waiting for them. Players can change their name at any time, from the room menu or the lobby, and everyone sees the new name at their next update.
 
+## Music and sound
+
+Everything you hear is made in the browser with the Web Audio API (`webapp/src/ui/sound.ts`): no sound files, nothing to license, a few KB of code, and it works on old TV browsers.
+
+- **Music** follows the game: a calm tune in the lobby, a bouncy one while drawing, a sneaky one while writing fake titles, a suspenseful one while voting. The melodies are made up anew every few bars.
+- **A ticking clock** for the last 20 seconds of every timer, sharper for the last 5. Beeps count down to the first drawing.
+- **The reveal** has a drum roll, a whoosh for each title, a blip for each player who picked it (or a shrug for nobody), a sad horn when a fake fooled someone, a fanfare for the real title, and coins on the scoreboard. A fanfare ends the game.
+- **The TV plays the sound.** Browsers keep a page silent until someone presses something, so the TV shows **Press OK for sound** in the corner, focused for the remote. The same button mutes it. Phones are quiet unless switched on from the ⋯ menu, for example on one phone when there's no TV. Both remember the choice.
+- `webapp/src/ui/director.ts` decides what plays when, from the same server clock the screens use, so the sounds stay in step with the reveal on every screen.
+
 ## Built for TVs, translation and right-to-left languages
 
 - **TV browsers** run old Chromium (Samsung: ~56 on 2018 models). The build ships an ES5 bundle with polyfills for browsers without ES modules (`@vitejs/plugin-legacy`), lowers the modern bundle to Chrome 64, and the CSS has fallbacks for flex `gap`, CSS Grid, `dvh` and `aspect-ratio`. The TV view is sized in `vh`, so it fills any screen, and it needs no input beyond the room code (`/?tv=ABCD` skips even that).

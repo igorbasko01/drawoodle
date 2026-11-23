@@ -2,6 +2,7 @@ import { FIB_MAX, MAX_PLAYERS, MAX_ROUNDS, MIN_PLAYERS, readyUntil } from '../en
 import { PACKS } from '../engine/prompts';
 import { api, ApiError, linkWith, loadIdentity, saveIdentity, type Identity } from '../online/client';
 import type { GameView, RoomSettings, RoomView } from '../online/types';
+import { Director } from './director';
 import { Pad } from './pad';
 import {
   clockHtml,
@@ -23,6 +24,7 @@ import {
   winnerHtml,
 } from './parts';
 import { fillPictures, pictureHtml, watchPictures } from './picture';
+import { Sound } from './sound';
 import { revealHtml, revealStage, scoresSoFar, yourGainLine } from './reveal';
 
 const POLL_MS = 1000;
@@ -55,8 +57,19 @@ export class PhoneApp {
   private tickTimer = 0;
   private autoTimer = 0;
 
+  /** Phones are quiet by default (the TV plays the sound); the menu turns it on, e.g. on one phone when there's no TV. */
+  private readonly sound = new Sound(false);
+  private readonly director = new Director(this.sound);
+
   constructor(private readonly root: HTMLElement) {
     watchPictures(root);
+    this.sound.unlockOnGesture();
+    this.sound.onChange(() => this.renderSoundItem());
+  }
+
+  private renderSoundItem() {
+    const b = this.root.querySelector<HTMLElement>('[data-sound]');
+    if (b) b.textContent = this.sound.on ? '🔊 Sound on this phone: on' : '🔇 Sound on this phone: off';
   }
 
   async start(params: URLSearchParams) {
@@ -223,6 +236,7 @@ export class PhoneApp {
 
   private stopRoom() {
     this.generation++;
+    this.director.update(null, 0);
     this.pad?.destroy();
     this.pad = null;
     this.room = null;
@@ -243,6 +257,7 @@ export class PhoneApp {
 
   private tick() {
     tickClocks(this.root, this.clockOffset);
+    this.director.update(this.room, this.serverNow);
     const g = this.room?.game;
     // During the reveal the whole screen follows the clock: the reveal itself, and the scores under it.
     if (g && g.phase === 'reveal' && this.room?.status === 'playing') this.renderGame(this.room, g);
@@ -293,6 +308,7 @@ export class PhoneApp {
               <div class="menu-items">
                 <button data-share>Invite players</button>
                 <button data-rename>Change my name</button>
+                ${Sound.supported() ? '<button data-sound data-sound-switch></button>' : ''}
                 <button data-skip hidden>Skip ahead ⏭</button>
                 <button data-end hidden>End game</button>
                 <div class="menu-remove"></div>
@@ -312,6 +328,8 @@ export class PhoneApp {
       this.root.querySelector('[data-end]')!.addEventListener('click', () => this.endGame());
       this.root.querySelector('[data-skip]')!.addEventListener('click', () => this.skip());
       this.root.querySelector('.room-bar [data-rename]')!.addEventListener('click', () => this.renameInRoom());
+      this.root.querySelector('[data-sound]')?.addEventListener('click', () => this.sound.setEnabled(!this.sound.on));
+      this.renderSoundItem();
       this.root.querySelector('[data-share]')!.addEventListener('click', () => this.share());
       for (const b of this.root.querySelectorAll('.menu-items button'))
         b.addEventListener('click', () => this.root.querySelector<HTMLDetailsElement>('.menu')!.removeAttribute('open'));
@@ -463,8 +481,8 @@ export class PhoneApp {
           <h2>📺 Big screen ${room.tv ? '<small class="ok">connected</small>' : ''}</h2>
           <p class="muted">${
             room.tv
-              ? 'The TV is showing this room.'
-              : `Best with a TV everyone can see: open this game on a TV or laptop, choose <b>Use this screen as a TV</b> and enter ${fixed(room.code, 'code')}.`
+              ? 'The TV is showing this room, and plays the music and sounds.'
+              : `Best with a TV everyone can see: open this game on a TV or laptop, choose <b>Use this screen as a TV</b> and enter ${fixed(room.code, 'code')}. No TV? Turn on the music and sounds on one phone, from the ⋯ menu.`
           }</p>
         </section>
         ${
