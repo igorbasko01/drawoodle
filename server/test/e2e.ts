@@ -1,6 +1,6 @@
 // Plays a whole game between four scripted players, with a TV watching, against a running server.
 // Usage: npx tsx test/e2e.ts [http://localhost:8787]
-import { POINTS, READY_MS, TIMES } from '../../webapp/src/engine/game';
+import { POINTS, READY_MS, revealMs, TIMES } from '../../webapp/src/engine/game';
 import type { RoomView } from '../../webapp/src/online/types';
 
 const base = process.argv[2] ?? 'http://localhost:8787';
@@ -152,6 +152,7 @@ const main = async () => {
     room = await call(`/api/rooms/${id}`, a.token);
     const rg = room.game!;
     assert(rg.phase === 'reveal' && rg.reveal!.length === 3 && rg.reveal![2].truth && rg.prompt === truth, 'once everyone has voted, the reveal shows the real title last');
+    assert(rg.endsAt - rg.phaseAt === revealMs(3), 'the reveal lasts as long as the screens take to show it');
     // Score it ourselves: finding the truth, the artist, and fooling others.
     const gains = [0, 0, 0, 0];
     gains[writers[0]] += POINTS.truth;

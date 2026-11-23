@@ -36,9 +36,44 @@ export const readyUntil = (g: { phase: Phase; step: number; phaseAt: number }) =
 /** Extra time after a deadline for the last submissions to arrive (phones send what they have when time runs out). */
 export const GRACE_MS = 2500;
 
-/** The reveal: a short intro, then one option after another (the real title last), then the scores. */
-export const REVEAL = { introMs: 2500, perOptionMs: 3200, scoresMs: 6500 };
-export const revealMs = (options: number) => REVEAL.introMs + options * REVEAL.perOptionMs + REVEAL.scoresMs;
+/**
+ * The reveal: a short intro, then one title after another (the real one last), then the
+ * scores. Each title shows on its own first, then who picked it, then who wrote it; the
+ * real title, the big moment, stays up a little longer.
+ */
+export const REVEAL = {
+  introMs: 3000,
+  /** The title on its own. */
+  titleMs: 2000,
+  /** Then who picked it. */
+  votersMs: 2000,
+  /** Then who wrote the fake. */
+  authorsMs: 3000,
+  /** Then, for the real title, who drew it. */
+  truthMs: 4000,
+  scoresMs: 8000,
+};
+
+/** How long the reveal of one title lasts. */
+const titleLength = (truth: boolean) => REVEAL.titleMs + REVEAL.votersMs + (truth ? REVEAL.truthMs : REVEAL.authorsMs);
+
+/** How long the whole reveal of a drawing lasts, with `options` titles (one of them real). */
+export const revealMs = (options: number) => REVEAL.introMs + (options - 1) * titleLength(false) + titleLength(true) + REVEAL.scoresMs;
+
+/** Where the reveal is, `t` ms after it began: the same moment on every screen. The `count` titles are in reveal order, the real one last. */
+export type RevealStage = { kind: 'intro' } | { kind: 'item'; k: number; sub: 0 | 1 | 2 } | { kind: 'scores' };
+
+export const revealStageAt = (count: number, t: number): RevealStage => {
+  if (t < REVEAL.introMs) return { kind: 'intro' };
+  let at = REVEAL.introMs;
+  for (let k = 0; k < count; k++) {
+    const within = t - at;
+    const length = titleLength(k === count - 1);
+    if (within < length) return { kind: 'item', k, sub: within < REVEAL.titleMs ? 0 : within < REVEAL.titleMs + REVEAL.votersMs ? 1 : 2 };
+    at += length;
+  }
+  return { kind: 'scores' };
+};
 
 export const POINTS = {
   /** For voting for the real title. */

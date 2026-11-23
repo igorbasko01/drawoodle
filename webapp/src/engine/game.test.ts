@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { checkDrawing, simplify } from './drawing';
-import { dealPrompts, nextPosition, normalize, optionsFor, POINTS, READY_MS, readyUntil, revealOrder, scoreDrawing, TIMES } from './game';
+import {
+  dealPrompts,
+  nextPosition,
+  normalize,
+  optionsFor,
+  POINTS,
+  READY_MS,
+  readyUntil,
+  REVEAL,
+  revealMs,
+  revealOrder,
+  revealStageAt,
+  scoreDrawing,
+  TIMES,
+} from './game';
 import { PACKS } from './prompts';
 
 describe('prompts', () => {
@@ -87,6 +101,24 @@ describe('flow', () => {
     expect(readyUntil({ phase: 'fib', step: 0, phaseAt: 500 })).toBe(500 + READY_MS);
     expect(readyUntil({ phase: 'fib', step: 1, phaseAt: 500 })).toBe(0);
     expect(readyUntil({ phase: 'vote', step: 0, phaseAt: 500 })).toBe(0);
+  });
+  it('reveals each title slowly enough to read: the title, then who picked it, then who wrote it', () => {
+    const at = (t: number) => revealStageAt(3, t);
+    expect(at(0)).toEqual({ kind: 'intro' });
+    const first = REVEAL.introMs;
+    expect(at(first)).toEqual({ kind: 'item', k: 0, sub: 0 });
+    expect(at(first + REVEAL.titleMs)).toEqual({ kind: 'item', k: 0, sub: 1 });
+    expect(at(first + REVEAL.titleMs + REVEAL.votersMs)).toEqual({ kind: 'item', k: 0, sub: 2 });
+    const fake = REVEAL.titleMs + REVEAL.votersMs + REVEAL.authorsMs;
+    expect(fake).toBeGreaterThanOrEqual(6000);
+    expect(at(first + fake)).toEqual({ kind: 'item', k: 1, sub: 0 });
+    // The real title, last, stays up longer.
+    const truthAt = first + 2 * fake;
+    expect(at(truthAt + fake)).toEqual({ kind: 'item', k: 2, sub: 2 });
+    const truth = REVEAL.titleMs + REVEAL.votersMs + REVEAL.truthMs;
+    expect(at(truthAt + truth)).toEqual({ kind: 'scores' });
+    // The phase lasts exactly until the scores have been up for their time.
+    expect(revealMs(3)).toBe(truthAt + truth + REVEAL.scoresMs);
   });
   it('skips a round without drawings', () => {
     expect(nextPosition({ round: 0, phase: 'draw', step: 0 }, { ...ctx, drawings: 0 })).toMatchObject({ round: 1, phase: 'draw' });
